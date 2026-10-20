@@ -1,0 +1,9 @@
+bin/
+xhx2api
+xhx2api-panel
+config.json
+auths/
+data/
+*.log
+*.test
+.DS_Store

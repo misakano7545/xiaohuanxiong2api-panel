@@ -1,0 +1,15 @@
+services:
+  xhx2api:
+    build: .
+    image: xiaohuanxiong2api-panel:local
+    container_name: xhx2api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7867:7867"
+    environment:
+      LISTEN: "0.0.0.0:7867"
+      API_KEY: "${API_KEY:-}"
+      TZ: Asia/Shanghai
+    volumes:
+      - ./auths:/app/auths
+      - ./config.json:/app/config.json:ro

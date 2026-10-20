@@ -1,0 +1,28 @@
+{
+  "listen": "127.0.0.1:7867",
+  "api_key": "",
+  "admin_key": "",
+  "auth_dir": "./auths",
+  "default_model": "raccoon-chat-ml-5-5",
+  "models": [],
+  "upstream": {
+    "llm_base": "https://xiaohuanxiong.com/api/web/llm/v2",
+    "auth_base": "https://xiaohuanxiong.com/api/web/auth/v1",
+    "points_base": "https://xiaohuanxiong.com/api/web/points/v1",
+    "origin": "https://xiaohuanxiong.com",
+    "user_agent": "xhx2api-panel/0.1.0",
+    "connect_timeout_seconds": 30,
+    "header_timeout_seconds": 120,
+    "request_timeout_seconds": 0
+  },
+  "pool": {
+    "max_rotate": 3,
+    "cooldown_seconds": 600,
+    "refresh_skew_seconds": 300
+  },
+  "schedule": {
+    "checkin_enabled": true,
+    "checkin_hours": [9],
+    "balance_refresh_minutes": 10
+  }
+}
