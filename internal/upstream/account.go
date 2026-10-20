@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -231,6 +232,52 @@ func (c *Client) UserCreatedAt(a *auth.Auth) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+// RecentBills 拉最近若干条积分流水（含消费行），用于把「每次请求到底扣了多少分」
+// 对回面板记录：消费行的 event_name 会带上我们出站时的 X-RACCOON-Title
+// （「桌面端 LLM 对话消耗」或「任务消耗 · <title>」），points 是负值。
+func (c *Client) RecentBills(a *auth.Auth, limit int) ([]BillRow, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	query := fmt.Sprintf("paging.limit=%d&type=all&paging.offset=0", limit)
+	resp, err := c.doJSON(http.MethodGet, c.pointsBase()+PointsBillsPath+"?"+query, nil, c.authHeader(a))
+	if err != nil {
+		return nil, err
+	}
+	data, err := payloadOf(resp, "积分流水")
+	if err != nil {
+		return nil, err
+	}
+	items, _ := data["items"].([]any)
+	out := make([]BillRow, 0, len(items))
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		if item == nil {
+			continue
+		}
+		row := BillRow{
+			BillID:    text(item, "bill_id"),
+			BizID:     text(item, "biz_id"),
+			BizType:   text(item, "biz_type"),
+			EventName: text(item, "event_name"),
+			Points:    mustInt(item["points"]),
+			CreatedAt: text(item, "created_at"),
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
+// BillRow 一条积分流水（只保留对账要用的字段）。
+type BillRow struct {
+	BillID    string `json:"bill_id"`
+	BizID     string `json:"biz_id"`
+	BizType   string `json:"biz_type"`
+	EventName string `json:"event_name"`
+	Points    int64  `json:"points"` // 消费为负，发放为正
+	CreatedAt string `json:"created_at"`
 }
 
 // CheckinStatus 查「今日每日发放是否已到账」：口径是 bills 流水里今天有没有

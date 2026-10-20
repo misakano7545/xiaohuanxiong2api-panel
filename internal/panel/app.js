@@ -711,9 +711,20 @@ function reqTokenCell(e) {
 }
 
 function reqCreditCell(e) {
-  if (!e || !e.credit_known) return '<span class="muted">—</span>';
-  const v = Number(e.credit);
-  return Number.isFinite(v) ? trimFixed(v.toFixed(2)) : '<span class="muted">—</span>';
+  if (!e) return '<span class="muted">—</span>';
+  if (!e.credit_known) {
+    // 上游扣费流水滞后 1~3 分钟：这段时间里确实扣了，但金额还没落账。
+    // 分两种说法——「会扣但还没到账」和「这次没有可计价产出（如失败请求）」。
+    const total = Number(e.total_tokens || 0) || (Number(e.prompt_tokens || 0) + Number(e.completion_tokens || 0));
+    return total
+      ? '<span class="muted" title="上游扣费流水滞后 1~3 分钟落账，刷新本页即按流水回填">待对账</span>'
+      : '<span class="muted">—</span>';
+  }
+  // credit_known 为真时 credit 缺省就是 0（后端 omitempty 会把 0 省掉，别显示成「—」）。
+  const v = Number(e.credit == null ? 0 : e.credit);
+  if (!Number.isFinite(v)) return '<span class="muted">—</span>';
+  // 上游对一次对话固定扣 2 分（实测与 token/倍率无关），0 分即限免模型不产生流水。
+  return trimFixed(v.toFixed(2)) + (v === 0 ? '<span class="muted" title="限免模型：本次未产生扣费"> 免</span>' : '');
 }
 
 function renderRequestTable() {

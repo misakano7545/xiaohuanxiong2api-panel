@@ -41,6 +41,8 @@ type reqTrace struct {
 	CacheHitTokens   int64
 	Credit           float64
 	HasCredit        bool
+	// CreditPending = 这次请求会产生扣费，但金额要等上游流水落账（面板稍后对账回填）。
+	CreditPending bool
 }
 
 // addUsage 把一次出站尝试的用量吸收进本请求的追踪游标。
@@ -73,6 +75,9 @@ func (t *reqTrace) addUsage(model string, d usage.Delta) {
 		if v, ok := usage.EstimateCredit(model, d.PromptTokens, d.CompletionTokens, d.CacheHitTokens); ok {
 			t.Credit += v
 			t.HasCredit = true
+		} else {
+			// 有真实产出的请求必然会被上游扣费（实测每轮固定 2 分），只是金额滞后到账。
+			t.CreditPending = true
 		}
 	}
 }
@@ -179,8 +184,13 @@ func logChatRow(tr *reqTrace, status int, outcome string, dur time.Duration, wit
 	if n := tr.PromptTokens + tr.CompletionTokens; n > 0 {
 		tok = strconv.FormatInt(n, 10)
 	}
-	if tr.HasCredit {
+	switch {
+	case tr.HasCredit:
 		credit = strconv.FormatFloat(tr.Credit, 'f', 4, 64)
+	case tr.CreditPending:
+		// 上游扣费流水滞后 1~3 分钟才落账，请求完成的这一刻还拿不到金额。
+		// 面板会在打开「请求记录」时按流水回填（panel.reconcileCredits）。
+		credit = "pending"
 	}
 	src := ""
 	if withSource {
@@ -189,6 +199,15 @@ func logChatRow(tr *reqTrace, status int, outcome string, dur time.Duration, wit
 	log.Printf("| #%03d | %s | %s | %s | %d | tok=%s | credit=%s | dur=%s | rid=%s | out=%s%s",
 		chatSeq.Add(1), tr.Start.Format("15:04:05"), tr.Model, tr.Account, status,
 		tok, credit, dur.Round(time.Millisecond), tr.ID, outcome, src)
+}
+
+// modelBareName 去掉面板载荷里的域前缀（cn:raccoon-8c4485 → raccoon-8c4485），
+// 用于按目录查模型（ResolveModel 收的是裸 id）。
+func modelBareName(model string) string {
+	if i := strings.Index(model, ":"); i >= 0 {
+		return model[i+1:]
+	}
+	return model
 }
 
 // ServeHTTP 在有记录器时给对话路径套追踪，其余路径原样透传。
@@ -227,6 +246,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ok := status >= 200 && status < 300
 	if !ok {
 		outcome = reqlog.OutcomeHTTPError
+	}
+	// 限免模型（目录里 billing_status=limited_free，Credits 归零为 x0）不产生扣费流水，
+	// 也就永远等不到对账——直接记 0，面板显示「0 免」，而不是一条悬着的「待对账」。
+	if ok && tr != nil && !tr.HasCredit {
+		if mi, found := h.cfg.Upstream.ResolveModel(modelBareName(tr.Model), ""); found && mi.Credits == "x0" {
+			tr.Credit, tr.HasCredit, tr.CreditPending = 0, true, false
+		}
 	}
 	rec.Record(reqlog.Event{
 		Time:             tr.Start,

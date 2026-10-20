@@ -556,7 +556,13 @@ func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, acct *auth
 	}
 
 	attemptStart := time.Now()
-	rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body)
+	// 标题带本请求的 rid：上游把它写进扣费流水（「任务消耗 · req-xxxx」），
+	// 面板据此把真实扣分对回这一行（upstream.RecentBills → panel.reconcileCredits）。
+	turnTitle := ""
+	if tr != nil {
+		turnTitle = tr.ID
+	}
+	rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body, turnTitle)
 	if terr != nil {
 		// 出站失败也要分类：排队/额度不是账号故障，无脑 NoteError 会把好号推进熔断
 		// （实测：上游一整天 p3 排队，账号被自己的排队记成 breaker）。

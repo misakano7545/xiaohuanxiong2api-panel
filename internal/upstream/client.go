@@ -598,7 +598,11 @@ func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, 
 //
 // 上游就是 OpenAI 形状：body 原样转发（model 已由 handler 定成规范 id），
 // 返回未读的 SSE 响应体供 Stream/Aggregate 消费；非 2xx 时返回分类后的 *Error。
-func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []byte, error) {
+//
+// turnTitle 非空时作为 X-RACCOON-Turn-Title 发出去。这不是装饰：上游会把标题写进
+// 积分流水的 event_name（「任务消耗 · <title>」），于是每一笔扣费都能反查到是哪一次
+// 请求——积分对账（见 upstream.RecentBills / panel.reconcileCredits）完全靠它。
+func (c *Client) ChatStream(a *auth.Auth, body []byte, turnTitle string) (io.ReadCloser, int, []byte, error) {
 	url := c.llmBase() + ChatPath
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -612,6 +616,11 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 		req.Header.Set(key, value)
 	}
 	req.Header.Set("User-Agent", c.currentUA())
+	// 标题用于积分对账：上游把它拼进扣费流水的 event_name（「任务消耗 · <title>」）。
+	// 头名沿用抓包里的写法（v1.1.0 客户端发 X-RACCOON-Title），空标题就不发。
+	if title := strings.TrimSpace(turnTitle); title != "" {
+		req.Header.Set("X-RACCOON-Title", title)
+	}
 	if token := a.JWT(); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}

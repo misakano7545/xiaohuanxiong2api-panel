@@ -160,6 +160,27 @@ func (r *Recorder) Begin() {
 	r.mu.Unlock()
 }
 
+// SetCredit 事后回填某条请求的真实积分（上游流水到账后由面板对账写入）。
+//
+// 为什么不在请求结束时直接写：小浣熊的扣费流水是异步落账的（实测 1~3 分钟后才出现），
+// 请求返回那一刻上游根本没给金额。宁可先空着（面板显示 —），也不能编一个估计值。
+// 返回是否命中（未命中说明这条已经从 recent 里滚掉，什么都不做）。
+func (r *Recorder) SetCredit(requestID string, credit float64) bool {
+	if r == nil || requestID == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.recent {
+		if r.recent[i].RequestID == requestID {
+			r.recent[i].Credit = credit
+			r.recent[i].HasCredit = true
+			return true
+		}
+	}
+	return false
+}
+
 // Record 记录一个请求完成事件并写入归档队列。
 func (r *Recorder) Record(e Event) {
 	if r == nil {

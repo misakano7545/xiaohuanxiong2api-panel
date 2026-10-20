@@ -15,6 +15,7 @@ import (
 
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/pool"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/reqlog"
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/upstream"
 )
 
@@ -317,5 +318,61 @@ func TestLoginRefreshRejectsGarbage(t *testing.T) {
 	code, _ := call(t, pn, http.MethodPost, "/panel/api/login/refresh", `{"refresh_token":""}`)
 	if code != http.StatusBadRequest {
 		t.Errorf("空 refreshToken 应 400，得到 %d", code)
+	}
+}
+
+// TestReconcileCredits 积分对账：上游扣费流水的 event_name 里带着我们出站的 X-RACCOON-Title
+// （「任务消耗 · req-xxxx」），面板据此把真实扣分回填到那条请求记录上。
+func TestReconcileCredits(t *testing.T) {
+	pn, up, p := newTestPanel(t)
+	_ = up
+	rec := reqlog.New(reqlog.Config{})
+	pn.cfg.RequestLog = rec
+	rec.Begin()
+	rec.Record(reqlog.Event{RequestID: "req-abcdef0123456789", Model: "cn:raccoon-8c4485",
+		Status: 200, OK: true, TotalTokens: 40})
+
+	// 指向上游假流水：一条带我们 rid 的消费行 + 一条无关的发放行。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"code":0,"data":{"items":[
+			{"biz_type":"desktop","event_name":"任务消耗 · req-abcdef0123456789","points":-2,
+			 "created_at":"2026-10-21T06:25:19+08:00"},
+			{"biz_type":"daily_grant","event_name":"每日积分发放","points":300,
+			 "created_at":"2026-10-21T00:25:04+08:00"}]}}`)
+	}))
+	defer srv.Close()
+	pn.cfg.Upstream.SetAPIHosts(srv.URL, srv.URL)
+
+	if n := pn.reconcileCredits(); n != 1 {
+		t.Fatalf("对账回填 %d 条，期望 1 条", n)
+	}
+	got := rec.Snapshot()
+	found := false
+	for _, e := range got.Recent {
+		if e.RequestID == "req-abcdef0123456789" {
+			found = true
+			if !e.HasCredit || e.Credit != 2 {
+				t.Errorf("回填后 credit_known=%v credit=%v，期望 true/2", e.HasCredit, e.Credit)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("请求记录里找不到那条 rid")
+	}
+	_ = p
+}
+
+// TestRequestIDFromBillEvent 只认我们自己的 rid 形态，别的标题不能被误当请求 id。
+func TestRequestIDFromBillEvent(t *testing.T) {
+	cases := map[string]string{
+		"任务消耗 · req-abcdef0123456789":    "req-abcdef0123456789",
+		"任务消耗 · 1+1=几? 请你直接回答":           "",
+		"桌面端 LLM 对话消耗":                   "",
+		"任务消耗 · req-0011aabbccddeeff 尾巴": "req-0011aabbccddeeff",
+	}
+	for in, want := range cases {
+		if got := requestIDFromBillEvent(in); got != want {
+			t.Errorf("requestIDFromBillEvent(%q) = %q，期望 %q", in, got, want)
+		}
 	}
 }

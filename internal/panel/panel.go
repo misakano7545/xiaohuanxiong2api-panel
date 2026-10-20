@@ -394,10 +394,85 @@ func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": out})
 }
 
+// reqIDMarker 请求记录里请求 id 的前缀（reqlog.NewRequestID 生成，16 位 hex）。
+const reqIDMarker = "req-"
+
+// reconcileCredits 用上游扣费流水回填请求记录的积分。
+//
+// 小浣熊不按次回报扣了多少分（token_usage 帧里只有 token），但每笔扣费都会落一条
+// 积分流水：biz_type=desktop、points<0、event_name 里带着我们出站时的 X-RACCOON-Title
+// （「任务消耗 · req-xxxxxxxxxxxxxxxx」）。所以对账是 1:1 精确匹配，不是估算：
+// 从 event_name 取出 rid → 找对应的请求记录 → 写入真实分值。
+//
+// 只在面板打开「请求记录」时跑一次（每账号一次只读流水请求），不做后台轮询：
+// 流水本身滞后 1~3 分钟，用户看的时候对一次就够了。
+func (p *Panel) reconcileCredits() int {
+	if p.cfg.RequestLog == nil || p.cfg.Upstream == nil || p.cfg.Pool == nil {
+		return 0
+	}
+	filled := 0
+	for _, st := range p.cfg.Pool.List() {
+		a := p.cfg.Pool.AuthByUID(st.UID)
+		if a == nil {
+			continue
+		}
+		rows, err := p.cfg.Upstream.RecentBills(a, 100)
+		if err != nil {
+			continue // 单个号查不到流水不拖累其它号，也不报错刷屏
+		}
+		for _, row := range rows {
+			if row.Points >= 0 {
+				continue // 只对消费行；发放行与我们无关
+			}
+			rid := requestIDFromBillEvent(row.EventName)
+			if rid == "" {
+				continue
+			}
+			if p.cfg.RequestLog.SetCredit(rid, float64(-row.Points)) {
+				filled++
+			}
+		}
+	}
+	if filled > 0 {
+		log.Printf("panel: 积分对账回填 %d 条请求记录", filled)
+	}
+	return filled
+}
+
+// requestIDFromBillEvent 从流水 event_name 里取我们自己的请求 id（req-…）。
+//
+// 上游把标题原样拼在「任务消耗 · <title>」后面；没带标题的老行（「桌面端 LLM 对话消耗」）
+// 取不到 id，返回空串 = 这条对不上，保持面板上的「—」。
+func requestIDFromBillEvent(name string) string {
+	i := strings.Index(name, reqIDMarker)
+	if i < 0 {
+		return ""
+	}
+	rest := name[i+len(reqIDMarker):]
+	// rid 是 req- 加 16 位 hex：只吃连续的十六进制字符，避免把后续标点带进来。
+	end := 0
+	for end < len(rest) {
+		c := rest[end]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+			end++
+			continue
+		}
+		break
+	}
+	if end == 0 {
+		return ""
+	}
+	return reqIDMarker + rest[:end]
+}
+
 // requestLogs 请求记录取数：优先读 JSONL 归档（可跨重启）；归档未开时回落到进程内最近 100 条
 // metrics.recent——否则「归档默认关」会让这一页永远空白，看起来像功能没做。
 // 筛选（关键字/结果）在前端做（一页最多 1000 条，零延迟）。
+//
+// 读之前先对一次账：上游扣费流水滞后 1~3 分钟，用户打开这一页通常就是想看「刚才那次扣了多少」，
+// 顺手回填比让用户等后台轮询更直接（每账号一次只读流水请求）。
 func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
+	p.reconcileCredits()
 	if p.cfg.RequestLog == nil {
 		writeErr(w, http.StatusNotImplemented, "request logger not available")
 		return
