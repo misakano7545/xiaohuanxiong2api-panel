@@ -389,7 +389,7 @@ func (h *Handler) writeSSELine(w io.Writer, flusher http.Flusher, line string, e
 func (h *Handler) jsonBack(w http.ResponseWriter, rc io.ReadCloser, ev *reqlog.Event) {
 	data, err := io.ReadAll(io.LimitReader(rc, 32<<20))
 	if err != nil {
-		ev.Status = http.StatusBadGateway
+		ev.Status = http.StatusServiceUnavailable
 		ev.Error = "read upstream response: " + err.Error()
 		writeOpenAIError(w, ev.Status, "upstream_read_error", ev.Error)
 		return
@@ -494,7 +494,9 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	if len(names) == 0 {
 		models, err := h.catalog(r.Context())
 		if err != nil && len(models) == 0 {
-			writeOpenAIError(w, http.StatusBadGateway, "catalog_unavailable", "上游模型目录不可用: "+err.Error())
+			// 不用 502：Cloudflare（含 CF Tunnel）会把 origin 的 502 body 换成自己的纯文本错误页，
+			// 客户端就拿不到这段 JSON。503 原样透传。
+			writeOpenAIError(w, http.StatusServiceUnavailable, "catalog_unavailable", "上游模型目录不可用: "+err.Error())
 			return
 		}
 		for _, m := range models {

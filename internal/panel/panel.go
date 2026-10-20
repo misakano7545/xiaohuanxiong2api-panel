@@ -277,7 +277,7 @@ func (p *Panel) accountRefresh(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	access, refresh, err := p.cfg.Upstream.Refresh(ctx, acct.RefreshValue())
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "续期失败: "+err.Error())
+		writeErr(w, http.StatusServiceUnavailable, "续期失败: "+err.Error())
 		return
 	}
 	acct.ApplyTokens(access, refresh)
@@ -297,7 +297,7 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 	}
 	bal, err := p.refreshBalance(r.Context(), acct)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "查询额度失败: "+err.Error())
+		writeErr(w, http.StatusServiceUnavailable, "查询额度失败: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, bal)
@@ -312,7 +312,7 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
 	if err := p.cfg.Upstream.ClaimDailyGrant(ctx, acct.Token()); err != nil {
-		writeErr(w, http.StatusBadGateway, "签到失败: "+err.Error())
+		writeErr(w, http.StatusServiceUnavailable, "签到失败: "+err.Error())
 		return
 	}
 	acct.MarkCheckedIn()
@@ -438,7 +438,7 @@ func (p *Panel) loginExchange(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := p.cfg.Upstream.ExchangeLoginCode(ctx, code)
 	if err != nil {
-		status := http.StatusBadGateway
+		status := http.StatusServiceUnavailable
 		var ue *upstream.Error
 		if errors.As(err, &ue) && ue.Kind == upstream.KindClient {
 			status = http.StatusBadRequest
