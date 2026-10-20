@@ -297,6 +297,38 @@ function renderAccounts(list) {
   }).join('');
 }
 
+// renderExpiry 积分到期提醒：按「最近到期日」给每号一行，回答「哪天会作废多少、
+// 想用完得日均消耗多少」。数据只用 overview 已经带回来的 credits / expire，
+// 不额外打上游——这一步是纯本地汇总。
+// 美元计费账号（国际版，credits 恒 0）不入表：两个单位不可换算。
+function renderExpiry(list) {
+  const rows = [];
+  for (const a of (list || [])) {
+    if (isUSD(a)) continue;
+    const remain = Number(a.credits || 0);
+    const exp = Number(a.expire || 0);
+    if (!exp || remain <= 0) continue;
+    // 四舍五入到「天」：向上取整会把 5 小时后到期的说成明天（和日期列矛盾），
+    // 纯向下又会把「整 3 天」说成 2 天；按最近的整天报最接近用户直觉。
+    const days = Math.max(0, Math.round((exp * 1000 - Date.now()) / 86400000));
+    rows.push({ uid: a.uid, remain, exp, days });
+  }
+  rows.sort((x, y) => x.exp - y.exp);
+  const tb = $('expBody');
+  if (!tb) return;
+  tb.innerHTML = !rows.length
+    ? '<tr><td colspan="5"><div class="empty">暂无到期信息（上游没给 expire，或余额已为 0）</div></td></tr>'
+    : rows.map(r => '<tr><td class="who"><div class="nm">' + esc(r.uid) + '</div></td>' +
+        '<td>' + new Date(r.exp * 1000).toLocaleDateString('zh-CN') + '</td>' +
+        '<td class="num">' + (r.days === 0 ? '今天' : r.days === 1 ? '明天' : r.days + ' 天') + '</td>' +
+        '<td class="num">' + fmtNum(r.remain) + '</td>' +
+        '<td class="num">' + fmtNum(Math.ceil(r.remain / Math.max(1, r.days))) + '</td></tr>').join('');
+  if ($('expNote')) {
+    const total = rows.reduce((s, r) => s + r.remain, 0);
+    $('expNote').textContent = rows.length ? rows.length + ' 个账号 · 合计 ' + fmtNum(total) : '—';
+  }
+}
+
 async function loadOverview(quiet) {
   try {
     const d = await api('overview');
@@ -345,6 +377,7 @@ async function loadOverview(quiet) {
     const up = Math.floor(d.uptime_sec || 0);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') +
       Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
+    renderExpiry(list);
     renderAccounts(list);
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }

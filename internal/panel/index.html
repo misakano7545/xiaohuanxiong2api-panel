@@ -688,6 +688,26 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <!-- 排程现状：下次签到/保活几点（时点在服务端配置里，改排程要重启）。 -->
         <div class="stat" title="排程现状（面板只读）"><div class="v" id="sSchedule">-</div><div class="k">下次签到</div></div>
       </div>
+      <!-- 积分到期提醒：数据全来自 /overview 的账号额度快照（credits + expire），
+           打开页面零上游请求。上游按失效时刻先后扣减（FEFO），所以「最近到期」
+           那一行最该先看：它的余额会在那天作废。 -->
+      <div class="box">
+        <header>
+          <h3>积分到期提醒 <span class="hint">按到期日聚合 · 日均需耗 = 该日到期积分 ÷ 距到期天数 · 上游按失效时刻先后自动优先扣减（FEFO）</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="expNote"></span>
+        </header>
+        <div class="tbl-wrap">
+        <table class="acc">
+          <thead><tr>
+            <th>账号</th><th>最近到期</th><th class="num">距到期</th>
+            <th class="num">该日到期</th><th class="num">日均需耗</th>
+          </tr></thead>
+          <tbody id="expBody"></tbody>
+        </table>
+        </div>
+      </div>
+
 
       <div class="box">
         <header>
