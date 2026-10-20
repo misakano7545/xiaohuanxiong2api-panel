@@ -133,6 +133,16 @@ func (p *Panel) accountImport(w http.ResponseWriter, r *http.Request) {
 		payload["pat"] = trim
 	case strings.HasPrefix(lower, "office-raccoon://"):
 		payload["callback"] = trim
+	case strings.HasPrefix(lower, "http://"), strings.HasPrefix(lower, "https://"):
+		// 环回回调链接（http://127.0.0.1:<port>/auth/callback?code=…）。面板部署在服务器/
+		// 局域网时浏览器打不开这条地址，但把整条链接粘进来照样能换票。
+		if !strings.Contains(lower, "/auth/callback") {
+			writeErr(w, http.StatusBadRequest, "http(s) 链接只认 …/auth/callback?code=… 这种回调地址")
+			return
+		}
+		payload["callback"] = trim
+	case strings.HasPrefix(lower, "ac_"):
+		payload["code"] = trim
 	case strings.HasPrefix(trim, "eyJ"):
 		payload["access_token"] = trim
 	default:

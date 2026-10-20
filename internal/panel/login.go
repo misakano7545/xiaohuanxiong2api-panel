@@ -9,7 +9,9 @@ import (
 	"html"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -103,6 +105,77 @@ func writeCallbackPage(w http.ResponseWriter, status int, title, detail string) 
 		html.EscapeString(detail)+`</p></body>`)
 }
 
+// callbackPort 从环回回调基址里取端口（只用于前端提示文案）。
+func callbackPort(base string) string {
+	if u, err := url.Parse(base); err == nil && u.Port() != "" {
+		return u.Port()
+	}
+	return ""
+}
+
+// isLoopbackRequest 面板页面是否从本机回环地址打开的（决定环回回调能否自动完成）。
+func isLoopbackRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	return host == "127.0.0.1" || strings.EqualFold(host, "localhost") || host == "::1"
+}
+
+// loginCode 收人工粘贴的回调链接：面板跑在服务器/局域网时，官方页那条 127.0.0.1 回调
+// 浏览器到不了（地址是写死的），用户把地址栏整条链接（或 office-raccoon:// 链接、裸 code）
+// 粘进来即可，效果与环回回调完全一样。
+//
+// 两条路径：state 命中未完成会话 → 交回该会话（前端现有轮询继续跑，UI 行为一致）；
+// 命中不了（换机/会话过期/只有 code）→ 直接换票入池。
+func (p *Panel) loginCode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON")
+		return
+	}
+	code, state, ok := upstream.ParseCallbackCode(req.URL)
+	if !ok {
+		writeErr(w, http.StatusBadRequest,
+			"认不出这条链接：请粘 http://127.0.0.1:<端口>/auth/callback?code=…&state=…、"+
+				"office-raccoon://auth/callback?code=… 或 ac_ 开头的授权码")
+		return
+	}
+	if state != "" {
+		p.loginMu.Lock()
+		sess, found := p.logins[state]
+		p.loginMu.Unlock()
+		if found && time.Since(sess.At) <= loginTTL {
+			if err := sess.Login.AcceptCallback(state, code); err != nil {
+				writeErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			log.Printf("panel: 收到粘贴的授权回调 state=%.8s…", state)
+			// 交回会话后由前端轮询换票，这里只报告已接收。
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "session", "id": state})
+			return
+		}
+	}
+	// 没有对应会话：自己换票（PrepareAccount 与「导入凭证」同一条管线）。
+	creds, err := p.cfg.Upstream.PrepareAccount(r.Context(), map[string]any{"code": code}, newMachineID())
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, publicErr(err))
+		return
+	}
+	uid, nick, err := p.saveAccount(creds)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "imported", "uid": uid, "nickname": nick})
+}
+
 // loginStart 生成设备授权链接：{id, url}。用户在自己浏览器里打开 url 完成授权。
 func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -137,6 +210,10 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 		"id":    login.State(),
 		"url":   login.AuthURL(),
 		"realm": realm,
+		// manual：当前页面不是从本机 127.0.0.1 打开的（局域网 IP / 域名 / 反代），
+		// 官方页那条 127.0.0.1 回调浏览器到不了，前端应引导用户粘贴回调链接。
+		"manual":        !isLoopbackRequest(r),
+		"callback_port": callbackPort(p.cfg.CallbackBase),
 	})
 }
 

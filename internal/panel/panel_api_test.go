@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -34,10 +35,14 @@ func newTestPanel(t *testing.T) (*Panel, *upstream.Client, *pool.Pool) {
 		case "/api/web/desktop/v1/login/points/grant":
 			_, _ = io.WriteString(w, `{"code":0,"data":{"granted":false,"popup":null}}`)
 		case "/user_info":
-			// 按令牌回身份：access-1 是 TestImportPAT 导入号的票，别的按 u-1。
-			if r.Header.Get("Authorization") == "Bearer access-1" {
+			// 按令牌回身份：access-1 是 TestImportPAT 导入号的票，code-access 是授权码
+			// 换来的票（office uid 以 user_info 为准，不是换票响应里的平台 id），别的按 u-1。
+			switch r.Header.Get("Authorization") {
+			case "Bearer access-1":
 				_, _ = io.WriteString(w, `{"code":0,"data":{"id":"u-2","name":"导入号"}}`)
-			} else {
+			case "Bearer code-access":
+				_, _ = io.WriteString(w, `{"code":0,"data":{"id":"u-9","name":"授权号"}}`)
+			default:
 				_, _ = io.WriteString(w, `{"code":0,"data":{"id":"u-1","name":"测试号"}}`)
 			}
 		case "/refresh":
@@ -220,6 +225,46 @@ func TestLoopbackLoginFlow(t *testing.T) {
 	}
 	if _, ok := p.Status("u-9"); !ok {
 		t.Errorf("授权完成后账号应进池")
+	}
+}
+
+// 跨机/服务器部署：官方回调地址写死 127.0.0.1，浏览器到不了，靠粘贴链接回填。
+// 三条路径都要能用：命中会话（交回轮询）、没有会话（直接换票入池）、裸授权码。
+func TestLoginCodePaste(t *testing.T) {
+	pn, _, p := newTestPanel(t)
+
+	// 1) 命中本次会话：与环回回调等价，poll 能收到号。
+	_, body := call(t, pn, http.MethodPost, "/panel/api/login/start", `{"realm":"cn"}`)
+	state := fmt.Sprint(body["id"])
+	pasted := "http://127.0.0.1:17867/auth/callback?code=ac_paste&state=" + state
+	code, res := call(t, pn, http.MethodPost, "/panel/api/login/code",
+		`{"url":`+strconv.Quote(pasted)+`}`)
+	if code != http.StatusOK || res["action"] != "session" {
+		t.Fatalf("粘贴会话链接 = %d %v", code, res)
+	}
+	code, res = call(t, pn, http.MethodGet, "/panel/api/login/poll?id="+state, "")
+	if code != http.StatusOK || res["done"] != true || res["uid"] != "u-9" {
+		t.Fatalf("粘回链接后 poll = %d %v", code, res)
+	}
+
+	// 2) 没有对应会话（换机/会话过期）：直接换票入池。
+	code, res = call(t, pn, http.MethodPost, "/panel/api/login/code",
+		`{"url":"office-raccoon://auth/callback?code=ac_orphan"}`)
+	if code != http.StatusOK || res["action"] != "imported" {
+		t.Fatalf("无会话链接 = %d %v", code, res)
+	}
+
+	// 3) 只截到授权码。
+	if code, res := call(t, pn, http.MethodPost, "/panel/api/login/code", `{"url":"ac_bare"}`); code != http.StatusOK {
+		t.Fatalf("裸授权码 = %d %v", code, res)
+	}
+
+	// 4) 认不出的东西要明确拒绝，不能默默当成功。
+	if code, _ := call(t, pn, http.MethodPost, "/panel/api/login/code", `{"url":"https://example.com/hello"}`); code != http.StatusBadRequest {
+		t.Errorf("无关链接应 400，得到 %d", code)
+	}
+	if len(p.List()) < 2 {
+		t.Errorf("粘贴登录后账号数 = %d", len(p.List()))
 	}
 }
 

@@ -350,8 +350,19 @@ func (c *Client) exchangeCode(code string) (*auth.Auth, error) {
 		Nickname:     text(data, "office_org_name", "office_identity"),
 		ExpiresAt:    auth.JWTExpiry(access),
 	}}
-	// 授权码换票的响应里带 user_id；access token 未必是 JWT，不能只靠解 token。
+	// 授权码换票的响应里带 user_id，但那是**平台 id**（pu-…，iam 域的），不是 office 域的
+	// 用户 id——同一个人在 token 导入路径里存的是 4465567/7719383 这种 office id，两条路
+	// 用不同 id 会让同一个号在池子里出现两行。所以这里以 user_info 的 id 为准，
+	// 换票响应里的 user_id 只当兜底。
 	account.UID = orDefault(text(data, "user_id", "uid", "userId"), auth.JWTUserID(access))
+	if uid, nick, _, err := c.GetUserInfo(account); err == nil {
+		if uid != "" {
+			account.UID = uid
+		}
+		if nick != "" {
+			account.Nickname = nick
+		}
+	}
 	if account.UID == "" {
 		return nil, &Error{Kind: ErrServer, Status: 502, Msg: "小浣熊授权码换票未返回用户标识"}
 	}
@@ -488,13 +499,36 @@ func ParseCallbackCode(raw string) (code, state string, ok bool) {
 	if i := strings.IndexAny(raw, "\r\n"); i >= 0 {
 		raw = raw[:i]
 	}
+	// 裸授权码（ac_…）直接认：用户在浏览器里可能只截到 code。
+	if strings.HasPrefix(raw, "ac_") && !strings.Contains(raw, "://") && !strings.Contains(raw, "?") {
+		return raw, "", true
+	}
 	parsed, err := url.Parse(raw)
-	if err != nil || !strings.EqualFold(parsed.Scheme, "office-raccoon") ||
-		parsed.Host != "auth" || parsed.Path != "/callback" {
+	if err != nil {
 		return "", "", false
 	}
 	query := parsed.Query()
+	switch {
+	case strings.EqualFold(parsed.Scheme, "office-raccoon"):
+		// 官方客户端回调：office-raccoon://auth/callback?code=…&state=…
+		if parsed.Host != "auth" || parsed.Path != "/callback" {
+			return "", "", false
+		}
+	case parsed.Scheme == "http" || parsed.Scheme == "https":
+		// 我们的环回回调：http://127.0.0.1:<port>/auth/callback?code=…&state=…
+		// 面板部署在服务器/局域网时，浏览器打不开这个本机地址，但地址栏里的链接是完整可用的——
+		// 用户把它整条粘过来即可（host 不再限定 127.0.0.1：反正是我们自己的路径形状）。
+		if parsed.Path != "/auth/callback" {
+			return "", "", false
+		}
+	default:
+		return "", "", false
+	}
 	code = query.Get("code")
+	if code == "" {
+		// 有的形态把授权码放 authorization_code（网页版口径）。
+		code = query.Get("authorization_code")
+	}
 	return code, query.Get("state"), code != ""
 }
 

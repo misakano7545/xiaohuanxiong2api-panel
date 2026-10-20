@@ -1139,6 +1139,15 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </div>
             <div class="hint">点下方链接在浏览器登录后，账号会自动进来（官方授权页支持本机环回回调，不需要装客户端）。<br>
               只有面板与浏览器不在同一台机器时，才需要把登录后跳到的 office-raccoon:// 回调链接，或账号 JSON 粘到「导入账号」里。</div>
+            <!-- 跨机/服务器部署：官方页的回调地址被写死成 127.0.0.1，浏览器打不开也不影响——
+                 地址栏里那条链接本身就是可用的授权码载体，粘回来即可。 -->
+            <div class="state err" id="addManualTip" hidden></div>
+            <label class="fld"><span class="lb">回调链接</span>
+              <input id="addCallbackUrl" spellcheck="false" autocomplete="off"
+                     placeholder="http://127.0.0.1:17867/auth/callback?code=…&state=… 或 office-raccoon://…">
+              <span class="hint">登录完成后浏览器若停在「无法访问此网站」，把地址栏那整条链接复制到这里提交即可。</span>
+            </label>
+            <button class="xs" id="btnSubmitCallback">提交回调链接</button>
         </div>
       </div>
       <div id="addTabToken" class="tab-panel" hidden>

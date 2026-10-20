@@ -1667,6 +1667,16 @@ function openAdd() {
     $('addReady').hidden = false;
     $('btnCopyUrl').hidden = false;
     $('btnOpenUrl').hidden = false;
+    $('addCallbackUrl').value = '';
+    // manual：当前页面不是从 127.0.0.1 打开的（局域网 IP / 域名 / 服务器），
+    // 官方页那条 127.0.0.1 回调浏览器到不了，只能靠粘贴链接回填。
+    const tip = $('addManualTip');
+    tip.hidden = !d.manual;
+    if (d.manual) {
+      tip.textContent = '注意：你正通过非本机地址访问面板（' + location.host +
+        '），官方授权页只会把授权码打到 127.0.0.1:' + (d.callback_port || '?') +
+        '。登录完成后请把浏览器地址栏那条链接粘到下面提交。';
+    }
     switchAddTab(addTab);
     // 授权页一打开就开始问：用户在任何时候完成授权，下一次轮询就收号（不用再点按钮）。
     pollFails = 0;
@@ -1688,6 +1698,30 @@ async function refreshLogin() {
     const d = await api('login/refresh', { method: 'POST', body: JSON.stringify({ refresh_token: rt, realm: addRealm }) });
     toast('已加入：' + (d.nickname || d.uid), 'ok');
     $('addVeil').classList.remove('on');
+    loadOverview(true);
+  } catch (e) {
+    $('addErr').hidden = false;
+    $('addErr').textContent = e.message;
+  } finally { btn.disabled = false; }
+}
+
+// submitCallback 提交人工粘贴的授权链接（跨机部署的唯一入口，与环回回调等价）。
+async function submitCallback() {
+  const raw = $('addCallbackUrl').value.trim();
+  if (!raw) { toast('先粘贴回调链接', 'err'); return; }
+  const btn = $('btnSubmitCallback');
+  btn.disabled = true;
+  try {
+    const d = await api('login/code', { method: 'POST', body: JSON.stringify({ url: raw }) });
+    if (d.action === 'session') {
+      // 交回了本次登录会话：立刻问一次，别等下一个 3s tick。
+      await pollLogin();
+      return;
+    }
+    toast('已加入：' + (d.nickname || d.uid), 'ok');
+    $('addVeil').classList.remove('on');
+    loginID = '';
+    stopLoginPoll();
     loadOverview(true);
   } catch (e) {
     $('addErr').hidden = false;
@@ -1776,6 +1810,9 @@ function boot() {
     r.onchange = () => { addRealm = r.value; openAdd(); };
   });
   $('btnAddClose').onclick = () => { stopLoginPoll(); loginID = ''; $('addVeil').classList.remove('on'); };
+  $('btnSubmitCallback').onclick = submitCallback;
+  // 回车即提交，省一次点击（粘贴完习惯性敲回车）。
+  $('addCallbackUrl').addEventListener('keydown', e => { if (e.key === 'Enter') submitCallback(); });
   $('btnCopyUrl').onclick = () => {
     if (navigator.clipboard) navigator.clipboard.writeText($('addUrl').textContent).catch(() => {});
   };
