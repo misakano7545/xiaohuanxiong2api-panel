@@ -1,3 +1,3 @@
-module github.com/misakano7545/xiaohuanxiong2api-panel
+module github.com/misakano7545/qoder2api-panel
 
-go 1.22.5
+go 1.22

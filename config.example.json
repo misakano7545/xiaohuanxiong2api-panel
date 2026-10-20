@@ -1,28 +1,54 @@
 {
-  "listen": "127.0.0.1:7867",
+  "listen": ":7864",
   "api_key": "",
-  "admin_key": "",
   "auth_dir": "./auths",
-  "default_model": "raccoon-chat-ml-5-5",
-  "models": [],
-  "upstream": {
-    "llm_base": "https://xiaohuanxiong.com/api/web/llm/v2",
-    "auth_base": "https://xiaohuanxiong.com/api/web/auth/v1",
-    "points_base": "https://xiaohuanxiong.com/api/web/points/v1",
-    "origin": "https://xiaohuanxiong.com",
-    "user_agent": "xhx2api-panel/0.1.0",
-    "connect_timeout_seconds": 30,
-    "header_timeout_seconds": 120,
-    "request_timeout_seconds": 0
-  },
-  "pool": {
-    "max_rotate": 3,
-    "cooldown_seconds": 600,
-    "refresh_skew_seconds": 300
+  "state_file": "./data/state.json",
+  "default_model": "Auto",
+  "cooldown": {
+    "plan_credit": "12h",
+    "soft_rate": "60s",
+    "soft_rate_max": "2h"
   },
   "schedule": {
+    "checkin_hours": [
+      9
+    ],
+    "keepalive_hours": [
+      3
+    ],
     "checkin_enabled": true,
-    "checkin_hours": [9],
-    "balance_refresh_minutes": 10
+    "keepalive_enabled": true,
+    "balance_refresh_enabled": true,
+    "balance_refresh_minutes": 5
+  },
+  "upstream": {
+    "timeout_seconds": 120,
+    "header_timeout_seconds": 120,
+    "idle_timeout_seconds": 300,
+    "user_agent": "",
+    "client_version": "",
+    "gateway_host": "",
+    "gateway_host_cn": ""
+  },
+  "pool": {
+    "max_in_flight": 3,
+    "breaker_threshold": 3,
+    "breaker_cooldown": "10m",
+    "breaker_cooldown_max": "2h",
+    "degrade_threshold": 5,
+    "degrade_cooldown": "10m",
+    "degrade_cooldown_max": "2h",
+    "idle_weight_per_hour": 0.5,
+    "idle_weight_max": 5,
+    "expiring_soon": "168h"
+  },
+  "session_sticky": {
+    "enabled": true,
+    "ttl": "30m",
+    "gc_interval": "5m"
+  },
+  "prompt": {
+    "mode": "passthrough",
+    "file": ""
   }
 }

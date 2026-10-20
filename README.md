@@ -1,156 +1,139 @@
-# xiaohuanxiong2api-panel
+# Qoder2API Panel
 
-把商汤「小浣熊」（`xiaohuanxiong.com`）的 Web/桌面客户端登录态，包成一个**本地 OpenAI 兼容网关**，
-同时提供 **Anthropic Messages** 与 **OpenAI Responses** 两个入口，让 Claude Code 和 Codex 这类
-编码代理直接把它当模型服务用。单二进制、内嵌管理面板、多账号轮转与自动续期。
+把 [Qoder](https://qoder.com)（国际版 `qoder.com` / 国内版 `qoder.com.cn`）的编码助手通道
+包装成 **OpenAI 兼容网关**，自带一个 Web 管理面板：多账号池、熔断冷却、会话粘性、
+COSY 签名转发、每日签到领 Credits、额度/套餐查询、模型目录、用量台账与请求日志。
 
-- **OpenAI SDK / curl** → `POST /v1/chat/completions`
-- **OpenAI Codex / 新版 Agent** → `POST /v1/responses`
-- **Claude Code / Anthropic SDK** → `POST /v1/messages`（同时挂 `/messages`）
+单二进制 + 内嵌页面 + 一份 JSON 配置，**纯 Go 标准库，零第三方依赖**。
 
-> 本项目与商汤科技无任何关系，非官方、未获授权。请遵守上游服务条款，仅个人自用；
-> 不要批量注册、转售或用于商业用途。不包含任何账号、token 或密钥。
+> 架构与交互以 [WorkBuddy2API Panel](https://github.com/linguo2625469/workbuddy2api-panel) 为基线，
+> 上游协议换成 Qoder 的 COSY 签名体系；协议事实取自 `bincooo/qoder2api`、`shuishuipingan/qoder2api-hub`、
+> `nullstacks/qoder2api`、`swysgh/qoder2api` 等公开实现，并已用本仓测试固定下来。
 
-## 为什么不是一个纯透传
+## 功能
 
-小浣熊的 LLM 网关本身就是 OpenAI `chat/completions` 形状（含 SSE、`reasoning_content`、
-`tool_calls`、`usage`），所以网关做的是三件事：
-
-1. **选号与续期**：池里的账号按优先级轮转，401 先刷新同号再重试，429 冷却，5xx 换号；
-2. **模型名回写**：上游会把响应帧里的 `model` 换成它内部名，网关改回客户端请求的名字；
-3. **协议翻译**：`/v1/messages` 与 `/v1/responses` 各自把入站请求翻成 chat 请求、
-   再把 chat 的 SSE 翻回各自的线上形状（Anthropic 的 `message_start/content_block_delta/message_stop`、
-   Responses 的 `response.created/output_text.delta/completed` 等），工具调用与思维链都在两条路上对齐。
+- **三种入站协议**：`POST /v1/chat/completions`（OpenAI chat，流式/非流式）、
+  `POST /v1/responses`（Codex）、`POST /v1/messages` 与 `POST /messages`（Anthropic，支持 `x-api-key`）；
+  三者都先归一成 chat 请求，再走**同一条链路**（挑号、冷却、会话粘性、提示词改写）
+- **`GET /v1/models`**：模型目录（两区并集；上游 `model/list` 是 GET 也必须带 `{}` body + 签名的
+  形状，本仓照实现，10 分钟缓存，拉不到回落到静态兜底）
+- **双区域**：国际版走 `api3.qoder.sh`（`jt-` 令牌分流到 `api2`），国内版走 `gateway.qoder.com.cn`；
+  账号地区决定模型可见性与出口
+- **多账号池**：积分加权挑选（闲置补偿 + 快过期优先）、在途限额、熔断、降权、计划冷却；
+  401 连续 3 次才禁用（一次抖动不杀号）
+- **错误分类**（HTTP 级与流内信封共用一张表）：额度/套餐 → 计划冷却；限流 → 软冷却退避；
+  登录态失效 → 会话失效计数；**排队（10605）不罚号**，换号重试即可
+- **账号接入两条路**：设备授权（PKCE S256，面板给链接、浏览器授权、服务端自己轮询收号）、
+  PAT / refreshToken 直登；都落到 `auths/qoder-<uid>.json`（0600，原子写回）
+- **签到与额度**：`sash` 活动列表 → 领取 `CLAIM_BENEFIT`（官方幂等，已领即「今日已领取」）；
+  额度按 `userQuota + addOnQuota + orgResourcePackage` 摊成「积分构成」
+- **COSY 签名转发**：AES-128-CBC 身份包 + RSA(PKCS#1 v1.5) 密钥 + MD5 签名，请求体走上游
+  自定义编码（`Encode=1`）；设备指纹 `cosy-machineid` 按账号稳定保存，可一键轮换
+- **Token 保活 / 定时签到 / 周期余额**：排程时点可配，refresh token 轮换后原子落盘
+- **可观测**：请求记录（含客户端 IP/UA，可关）、用量台账（时间片 × 账号 × 模型）、
+  Prometheus 指标、运行日志环
 
 ## 快速开始
 
 ```bash
-git clone https://github.com/misakano7545/xiaohuanxiong2api-panel
-cd xiaohuanxiong2api-panel
-cp config.example.json config.json      # 按需改 listen / api_key
-go build -o xhx2api ./cmd/server
-./xhx2api -config ./config.json
+go build ./...                                          # 全量构建
+CGO_ENABLED=0 go build -o q2api ./cmd/server            # 静态二进制
+./q2api -config ./config.json                           # 缺配置时先写一份默认配置再起
 ```
 
-```bash
-# 健康检查
-curl -s http://127.0.0.1:7867/healthz
+- 默认监听 `:7864`，面板 `http://127.0.0.1:7864/panel/`
+- 首次运行会生成 `config.json`，其中 `api_key` 是随机 `sk-…`（面板「配置」页可改）
+- 账号目录不存在会自动创建；没有账号是正常启动态
 
-# 模型列表（来自上游目录，visible:false 的不展示）
-curl -s -H 'Authorization: Bearer <api_key>' http://127.0.0.1:7867/v1/models
-
-# 一条 chat
-curl -s -H 'Authorization: Bearer <api_key>' -H 'Content-Type: application/json' \
-  -d '{"model":"raccoon-chat-ml-5-5","messages":[{"role":"user","content":"你好"}]}' \
-  http://127.0.0.1:7867/v1/chat/completions
-```
-
-面板：浏览器打开 `http://127.0.0.1:7867/panel/`，第一次会让你填面板密钥
-（`admin_key`，留空则用 `api_key`）。
-
-### Docker
+Docker：
 
 ```bash
 cp config.example.json config.json
-docker compose up -d --build
+docker compose up -d          # 镜像内二进制 /app/q2api，数据在 ./auths 与 ./data
 ```
 
-`auths/` 与 `data/` 是挂载卷；容器以 uid 10001 运行，宿主机目录需要可写（`chown -R 10001`）。
+## 用法
 
-## 添加账号
+1. 面板 → **账号** → **添加账号**
+   - 浏览器登录：选地区（国际版 / 国内版）→ 「打开」在新标签页完成 Qoder 授权 → 面板每 3 秒自动收号
+   - refreshToken / PAT：另一页签直接粘（`pt-` 开头按 PAT 兑换，其余按刷新令牌续期）
+2. **模型**页确认目录已拉到官方清单（拉不到会显示静态兜底并留日志）
+3. 客户端指向 `http://<host>:7866/v1`，`Authorization: Bearer <api_key>`：
 
-两种方式，都落到 `auths/<uid>.json`（0600，原子写）：
-
-**面板「导入账号」** —— 粘贴一份 JSON：
-
-```json
-{"access_token":"eyJ…","refresh_token":"eyJ…","name":"小浣熊-1"}
+```bash
+curl http://127.0.0.1:7866/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen3.8-Max","stream":true,
+       "messages":[{"role":"user","content":"用 Go 写个快排"}]}'
 ```
 
-token 从浏览器登录 `xiaohuanxiong.com` 后取：DevTools → Application → Local Storage，
-或任意一次请求的 `Authorization` 头。缺 `refresh_token` 也能跑，但 access token 过期后
-无法自动续期（面板会提示）。
+模型名接受官方显示名、小写写法与上游 key（`Qwen3.8-Max` / `qwen3.8-max` / `qmodel_38max`）；
+未知模型直接 400，不做猜测。
 
-**面板「网页登录」** —— 点开授权页登录 → 浏览器跳到
-`office-raccoon://auth/callback?code=…&state=…`（页面提示打不开是正常的）→ 把整条链接粘回来。
-`state` 由本服务生成、10 分钟有效、一次性消费。
+地区用前缀指定：`cn:Auto`（国内版）/ `global:Auto`（国际版）；不带前缀按目录归属走，
+某个地区没有可用账号时会落到另一个地区。
+
+## 端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/v1/chat/completions` | OpenAI chat（流式 / 非流式） |
+| POST | `/v1/responses` | Codex Responses |
+| POST | `/v1/messages`、`/messages` | Anthropic Messages |
+| POST | `/v1/messages/count_tokens`、`/messages/count_tokens` | 上下文 token 估算（字符/4，本地算，不占额度） |
+| GET | `/v1/models` | 模型目录 |
+| GET | `/status` | 账号池状态（需 key） |
+| GET | `/healthz` | 存活探针（不需要 key） |
+| GET | `/panel/` | 管理面板 |
+
+面板 API 在 `/panel/api/*`（overview / models / packages / usage / request_logs / config /
+login/* / accounts/* / checkin / balance / keepalive）。空 `api_key` 时只信本机回环，
+写操作另外校验同源。
 
 ## 配置
 
-`config.json`（JSON）里的键都是**环境变量的默认值**：环境变量永远优先，文件只补空缺。
+见 `config.example.json`。要点：
 
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `listen` | `127.0.0.1:7867` | 监听地址；对外暴露前先设 `api_key` |
-| `api_key` | `""` | `/v1/*` 的 Bearer 密钥，空 = 不鉴权 |
-| `admin_key` | `""` | 面板密钥，空则回落到 `api_key` |
-| `auth_dir` | `./auths` | 账号目录 |
-| `default_model` | `raccoon-chat-ml-5-5` | 请求没带 `model` 时用 |
-| `models` | `[]` | 非空时作为模型白名单与 `/v1/models` 内容，不再拉上游目录 |
-| `upstream.llm_base` | `https://xiaohuanxiong.com/api/web/llm/v2` | 聊天与目录 |
-| `upstream.auth_base` | `…/api/web/auth/v1` | 续期 |
-| `upstream.points_base` | `…/api/web/points/v1` | 积分余额 |
-| `upstream.origin` | `https://xiaohuanxiong.com` | 每日积分发放（签到） |
-| `upstream.request_timeout_seconds` | `0` | 单次 chat 总超时，`0` = 不设（长流式回答） |
-| `pool.max_rotate` | `3` | 单请求最多试几个号 |
-| `pool.cooldown_seconds` | `600` | 429/连续失败后的冷却 |
-| `pool.refresh_skew_seconds` | `300` | 提前多久续期 |
-| `schedule.checkin_enabled` / `checkin_hours` | `true` / `[9]` | 每日签到（`setting_info` 触发当日积分发放） |
-| `schedule.balance_refresh_minutes` | `10` | 后台刷额度间隔 |
+| 键 | 说明 |
+|---|---|
+| `listen` / `api_key` | 监听地址；空 = 不鉴权（仅本机） |
+| `auth_dir` / `state_file` | 账号目录与池状态；用量台账与请求归档默认跟 `state_file` 同目录 |
+| `default_model` | 请求缺 `model` 或写 `auto` 时用，默认 `Auto` |
+| `cooldown.plan_credit` | 额度不足/套餐不支持的硬冷却（默认 12h） |
+| `upstream.gateway_host` / `gateway_host_cn` | 网关基址，留空用内置（`api3.qoder.sh` / `gateway.qoder.com.cn`） |
+| `upstream.timeout_seconds` / `header_timeout_seconds` / `idle_timeout_seconds` | 短请求 / 首字节 / 流内空闲 |
+| `pool.*` | 熔断、降权、在途、闲置补偿、快过期窗口 |
+| `session_sticky.*` | 同一会话粘同一账号（命中上游缓存） |
+| `prompt.mode` / `file` | `passthrough` / `custom` / `append` 系统提示词改写 |
+| `schedule.*` / `logging.*` | 签到/保活时点、余额周期、请求记录与归档 |
 
-对应环境变量：`LISTEN`、`API_KEY`、`ADMIN_KEY`、`AUTH_DIR`、`DEFAULT_MODEL`、`MODELS`、
-`LLM_BASE`、`AUTH_BASE`、`POINTS_BASE`、`ORIGIN`、`POOL_MAX_ROTATE`、`POOL_COOLDOWN_SECONDS`、
-`POOL_REFRESH_SKEW_SECONDS`、`CHECKIN_ENABLED`、`BALANCE_REFRESH_MINUTES`。
+环境变量覆盖：`Q2A_<段>_<键>`，如 `Q2A_LISTEN=0.0.0.0:7864`、`Q2A_API_KEY=sk-…`。
 
-## 接到客户端
+## 发版
 
-**Claude Code**（`~/.claude/settings.json` 或环境变量）：
+版本号是上海时间 `v2026.10.19.0930`（日期不补零，时分不补零/两位）；标签、Release 与二进制
+版本串同一个号。本地构建显示 `dev`，CI 用 `-X main.appVersion=<tag>` 注入；推 `v*` 标签才会
+创建 Release 并推送镜像。
 
-```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:7867
-export ANTHROPIC_AUTH_TOKEN=<api_key>
-```
+## 已知限制
 
-**Codex / Responses 客户端**：
-
-```toml
-# ~/.codex/config.toml
-model_provider = "xhx"
-model = "raccoon-chat-ml-5-5"
-
-[model_providers.xhx]
-name = "小浣熊"
-base_url = "http://127.0.0.1:7867/v1"
-env_key = "XHX_API_KEY"
-wire_api = "responses"
-```
-
-**任何 OpenAI SDK**：`base_url=http://127.0.0.1:7867/v1`，`api_key=<api_key>`。
-
-## 行为与边界
-
-- **模型校验**：默认按上游目录校验（未知模型直接 400，不打上游）；目录拉不到时不拦请求，
-  交给上游自己报错。`models` 非空时以白名单为准。
-- **错误透传**：请求本身被上游拒（4xx 非 401/429）时不换号，照实回上游状态码与原话。
-- **冷却**：429 立刻冷却；连续失败 3 次进入冷却。冷却只在运行期生效，重启清零。
-- **不注入提示词**、不改消息序列（小浣熊上游不要求首条是 system）。
-- **不支持 `reasoning_effort` / `thinking.budget_tokens` 的档位选择**：上游不认这类字段，
-  网关不强塞；上游自己返回的 `reasoning_content` 会作为 thinking/推理内容下发。
-- `/v1/chat/completions` 的请求体除 `model` 外**原样透传**（图片多模态、`tool_choice`、
-  `parallel_tool_calls` 都跟着走）。
-- 请求台账只放内存（最近 500 条），重启清空；它不是计费账本。
+- **国内版签到**需要设备风控身份（UMID 那一套）。本仓未移植：国内号会拿到空活动列表并
+  按「今日无活动」跳过，不会伪装成功。
+- **积分单价不内置**：Qoder 没有稳定可引用的积分价目，面板「积分≈」显示 `—`，不做估算
+  （同名模型多，错配单价会静默给出错误金额）。
+- **凭证明文落盘**（`auths/*.json`，0600）：宿主机目录本身也要收紧。
+- **同一批账号不要同时挂到多个网关**（如 agent2api 与本仓）：两边各自续期 refresh token
+  会互相顶掉。
+- 上游接口随时可能变（COSY 版本号、信封结构、模型名）；出问题先比对 `internal/upstream/`
+  的协议常量与参考实现。
 
 ## 开发
 
 ```bash
-go build ./...
-go test ./...          # internal/server 用 httptest 假上游，覆盖三协议 × 流/非流 × 工具调用
-go test -race ./...
+go vet ./...
+go test ./...        # COSY 已知向量、凭证解析、SSE 信封、端到端假上游（流式/非流式/工具调用/签到）
 ```
 
-代理结构：`internal/upstream`（上游调用）→ `internal/pool`（选号/冷却）→
-`internal/server`（三协议入口）→ `internal/panel`（管理面板）。
-
-## License
-
-MIT，见 [LICENSE](LICENSE)。
+没有真账号时联调全链路：`python3 scripts/qoder_stub.py 7899` 起假上游，另起一个实例把
+`upstream.gateway_host`/`gateway_host_cn` 指向 `http://127.0.0.1:7899/`、放一份假凭证进
+`auths/qoder-<uid>.json`，即可验证签名→组包→SSE 转换（桩会拒绝没有 COSY 头的请求）。

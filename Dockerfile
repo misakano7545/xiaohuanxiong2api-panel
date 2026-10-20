@@ -1,17 +1,21 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.24-alpine AS build
+# 多阶段构建：Go 编译 + alpine 运行时（非 root + healthcheck）。
+FROM golang:1.23-alpine AS build
 WORKDIR /src
 COPY go.mod ./
+RUN go mod download
 COPY . .
-ARG VERSION=0.1.0
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/xhx2api ./cmd/server
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/q2api ./cmd/server
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 app
-WORKDIR /app
-COPY --from=build /out/xhx2api /app/xhx2api
-RUN mkdir -p /app/auths && chown -R app:app /app
+RUN apk add --no-cache wget ca-certificates tzdata \
+ && adduser -D -u 10001 app \
+ && mkdir -p /app/auths /app/data \
+ && chown -R app:app /app
 USER app
-ENV CONFIG=/app/config.json
-EXPOSE 7867
-ENTRYPOINT ["/app/xhx2api"]
+WORKDIR /app
+COPY --from=build /out/q2api /app/q2api
+EXPOSE 7864
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
+  CMD wget -qO- http://127.0.0.1:7864/healthz || exit 1
+ENTRYPOINT ["/app/q2api", "-config", "/app/config.json"]

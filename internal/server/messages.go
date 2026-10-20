@@ -2,9 +2,9 @@
 // ponytail: 不存会话；客户端每轮带全量 messages。上游 reasoning_content 无 signature，
 // 作为 thinking 块下发展示；客户端回传的 thinking 块丢弃（不触发签名校验）。
 // top_k / cache_control / context_management / betas 上游 chat 没有对应物，丢掉。
-// count_tokens 单独回答（见 countTokens：按字符粗估，小浣熊没有计数接口）。
+// count_tokens 单独回答（见 countTokens：按字符粗估，Qoder 没有计数接口）。
 // 内置服务端工具（web_search / code_execution / bash_* …）没有本地执行器，丢掉并在 system 里写明。
-// usage 缓存字段若上游直报（cache_read_/cache_creation_input_tokens）则原样透出，截断映射 refusal。
+// usage 缓存字段走 SOLO 直报（cache_read_/cache_creation_input_tokens 原样透出），截断映射 refusal。
 package server
 
 import (
@@ -59,7 +59,7 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	h.chatCompletions(rw, r2)
 }
 
-// countTokens 回答 Anthropic 的 POST /v1/messages/count_tokens。小浣熊上游没有计数接口，
+// countTokens 回答 Anthropic 的 POST /v1/messages/count_tokens。Qoder 上游没有计数接口，
 // 按字符数/4 粗估（借鉴 magpie 对无计数能力 provider 的处理）：Claude Code 用它判断上下文
 // 余量，估偏 10% 比 404 让它自己猜要好。shortcut: 字符/4，对中文偏低估，需要精确时接真分词器。
 func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
@@ -77,43 +77,50 @@ func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON: "+err.Error())
 		return
 	}
-	// 中日韩字符在主流分词器里约 1 token/字，其余按 4 字符/token 估；两个计数分开攒，
-	// 混着累加会把 4 倍权重带到中文上。
-	cjk, ascii := 0, 0
-	for _, r := range flattenText(obj) {
-		if r >= 0x2E80 {
-			cjk++
-			continue
-		}
-		ascii++
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": cjk + ascii/4})
+	// 向上取整：极短 prompt 回 0 会让客户端以为「上下文是空的」。
+	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": countChars(obj)})
 }
 
-// flattenText 把请求体里的正文拼成一串（跳过模型名、类型、role 这类非正文键）。
-func flattenText(v any) []rune {
-	var out []rune
-	var walk func(any)
-	walk = func(v any) {
-		switch t := v.(type) {
-		case string:
-			out = append(out, []rune(t)...)
-		case []any:
-			for _, it := range t {
-				walk(it)
-			}
-		case map[string]any:
-			for k, it := range t {
-				switch k {
-				case "model", "type", "role", "id", "tool_use_id", "cache_control", "stop_sequences", "metadata":
-					continue
-				}
-				walk(it)
-			}
+// countTokensEstimate 按字符类型折算 token：实测中文 0.62 token/字、英文约 4 字符/token
+// （2026-10 长上下文针测试：400k 汉字 = 249,847 token）。纯 chars/4 对中文低估 2.5 倍。
+// 不含 Qoder 上游自己注入的系统提示（客户端看不到，随请求固定，不影响力度的判断）。
+func tokenEstimate(runes []rune) int {
+	n := 0.0
+	for _, r := range runes {
+		switch {
+		case r > 0x2E80: // CJK / 假名 / 谚文
+			n += 0.62
+		default:
+			n += 0.25
 		}
 	}
-	walk(v)
-	return out
+	return int(n + 0.999)
+}
+
+// countChars 累加请求里的正文字符：跳过结构字段（模型名/类型/角色/id），只算真正占用
+// 上下文的文本——system、消息内容、工具名/描述/参数。
+func countChars(v any) int {
+	switch t := v.(type) {
+	case string:
+		return tokenEstimate([]rune(t))
+	case []any:
+		n := 0
+		for _, it := range t {
+			n += countChars(it)
+		}
+		return n
+	case map[string]any:
+		n := 0
+		for k, it := range t {
+			switch k {
+			case "model", "type", "role", "id", "tool_use_id", "cache_control", "stop_sequences", "metadata":
+				continue
+			}
+			n += countChars(it)
+		}
+		return n
+	}
+	return 0
 }
 
 func writeAnthropicError(w http.ResponseWriter, status int, typ, msg string) {
@@ -659,8 +666,8 @@ func anthropicUsage(v any) map[string]any {
 	if n, ok := u["completion_tokens"]; ok {
 		out["output_tokens"] = n
 	}
-	// 上游若直接报 cache_read_/cache_creation_input_tokens 就原样透出；
-	// 不映射的话 Claude 系客户端一律显示缓存读取 0。
+	// SOLO 上游直接报 cache_read_/cache_creation_input_tokens（实测 2026-09-28），
+	// 原样透出；不映射 Claude 系客户端一律显示缓存读取 0。
 	var cacheRead, cacheWrite float64
 	if n, ok := u["cache_read_input_tokens"]; ok {
 		out["cache_read_input_tokens"] = n
@@ -671,8 +678,8 @@ func anthropicUsage(v any) map[string]any {
 		cacheWrite = asNum(n)
 	}
 	// ponytail: Claude 口径的 input_tokens **不含**缓存读/写（单独字段计），拿上游
-	// 全量 prompt_tokens 直出会让 Claude Code 的上下文占用被缓存量虚抬。上游若把
-	// 缓存量算进 prompt_tokens（`cache_read=45 / prompt=45`），故减掉；两者都没有
+	// 全量 prompt_tokens 直出会让 Claude Code 的上下文占用被缓存量虚抬。SOLO 实测
+	// 确实包含（`cache_read=45 / prompt=45`，见 responses.go 注），故减掉；两者都没有
 	// 时 sub=0，一字不动。
 	if sub := cacheRead + cacheWrite; sub > 0 {
 		if in := asNum(out["input_tokens"]) - sub; in < 0 {

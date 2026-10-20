@@ -1,344 +1,488 @@
-// Package auth 是单个小浣熊账号的凭证（access_token / refresh_token）与其落盘。
+// Package auth 解析 Qoder 账号凭证：磁盘形态、PAT 打包形式、地区判定、
+// 原子写回与目录扫描。
 //
-// 一个账号一个文件（auths/<uid>.json），原子写（临时文件 + rename，0600）——
-// 上游的 refresh_token 每次刷新都会轮换，新值只有落盘成功才算真到手。
+// 一个账号一行 JSON（auths/qoder-<uid>.json）：
+//
+//	{"mode":"global","accessToken":"dt-…","refreshToken":"…|<uid>|<machineId>",
+//	 "expiresAt":1792369369000,"userId":"…","email":"…","nickname":"…","machineId":"…"}
+//
+// 刷新串（refreshToken）的形态由上游决定，两种都可能出现：
+//
+//	pat|<PAT>|<job refresh>|<uid>|<machineId>   ← 用个人访问令牌换来的账号
+//	<device refresh>|<uid>|<machineId>          ← 设备授权登录的账号
+//
+// 前缀与后缀都由这里解释，别的包只看 PAT()/OAuthRefresh()/CanRefresh()。
 package auth
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// Data 是一个账号的可序列化字段（不含锁与路径，避免拷锁）。
-type Data struct {
-	UID          string `json:"uid"`
-	Name         string `json:"name"`
-	UserID       string `json:"user_id,omitempty"`
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token,omitempty"`
-	ExpiresAt    int64  `json:"expires_at,omitempty"` // 毫秒；0 = 未知
-	Enabled      bool   `json:"enabled"`
-	Priority     int    `json:"priority,omitempty"`
-	Note         string `json:"note,omitempty"`
-	CreatedAt    string `json:"created_at,omitempty"`
+// tmpSeq 让同一个账号文件的临时名在进程内唯一（见 saveAtomicLocked）。
+var tmpSeq atomic.Uint64
 
-	// Credit 是最近一次查询到的可用积分（仅展示，-1 = 未知）。
-	Credit    int64  `json:"credit,omitempty"`
-	CreditAt  string `json:"credit_at,omitempty"`
-	CheckedIn string `json:"checked_in,omitempty"` // 最近签到成功的日期 YYYY-MM-DD
-}
+// 地区（realm）：国际版与国内版是两套 host、两套凭证，互不通用。
+const (
+	RealmGlobal = "global"
+	RealmCN     = "cn"
+	// RealmIntl 是国际版的旧写法（面板/日志里两个名字都出现过，别再分叉第三个别名）。
+	RealmIntl = RealmGlobal
+)
 
-// Auth 是一个账号：Data 加一把锁和落盘路径。
+// MaxTokenLength 是 token 字段长度上限（与上游客户端同一口径）。
+const MaxTokenLength = 8192
+
+// Auth 归一化后的账号凭证。
+//
+// 并发模型：mu 保护可变字段（AccessToken/RefreshToken/ExpiresAt/MachineID），
+// 写路径（upstream 续期）持写锁整段执行，读路径持读锁取快照。
+// 其余字段（RealmID/UID/Nickname/Email/FilePath）加载后不变，直接读。
 type Auth struct {
-	Data
-	path string
-	mu   sync.RWMutex
+	mu sync.RWMutex
+
+	AccessToken  string // COSY 身份 JSON 里的 security_oauth_token
+	RefreshToken string // 打包形态见包注释，每次续期轮换
+	ExpiresAt    int64  // Unix 毫秒（access token 到期时刻；0 = 未知）
+	RealmID      string // "global" | "cn"
+	MachineID    string // cosy-machineid，账号稳定设备指纹
+	UID          string
+	Nickname     string
+	Email        string
+	FilePath     string // 落盘路径；续期后原子写回
 }
 
-// New 用一对 token 建账号：uid 取 JWT 里的用户 id，取不到就用 token 的哈希。
-func New(access, refresh, name string) *Auth {
-	access = stripBearer(access)
-	refresh = stripBearer(refresh)
-	uid := JWTUserID(access)
-	if uid == "" {
-		uid = JWTUserID(refresh)
-	}
-	if uid == "" {
-		seed := refresh
-		if seed == "" {
-			seed = access
-		}
-		sum := sha256.Sum256([]byte(seed))
-		uid = "t" + hex.EncodeToString(sum[:])[:10]
-	}
-	if name = strings.TrimSpace(name); name == "" {
-		name = uid
-	}
-	return &Auth{Data: Data{
-		UID:          uid,
-		Name:         name,
-		AccessToken:  access,
-		RefreshToken: refresh,
-		ExpiresAt:    JWTExpiry(access),
-		Enabled:      true,
-		CreatedAt:    time.Now().Format(time.RFC3339),
-		Credit:       -1,
-	}}
-}
+// Lock / Unlock / RLock / RUnlock 供其他包在改写字段期间加锁。
+func (a *Auth) Lock()    { a.mu.Lock() }
+func (a *Auth) Unlock()  { a.mu.Unlock() }
+func (a *Auth) RLock()   { a.mu.RLock() }
+func (a *Auth) RUnlock() { a.mu.RUnlock() }
 
-// Parse 解析面板/手工粘贴进来的一份账号 JSON。
-func Parse(raw []byte) (*Auth, error) {
-	var in struct {
-		Data
-		Enabled *bool `json:"enabled"` // 缺省 true：没写这个键时不能让新导入的号立刻不可用
-	}
-	if err := json.Unmarshal(raw, &in); err != nil {
-		return nil, fmt.Errorf("解析账号 JSON: %w", err)
-	}
-	access := stripBearer(in.AccessToken)
-	if access == "" {
-		return nil, fmt.Errorf("缺少 access_token")
-	}
-	base := New(access, in.RefreshToken, in.Name)
-	if in.UID != "" {
-		base.UID = in.UID
-	}
-	if in.UserID != "" {
-		base.UserID = in.UserID
-	}
-	if in.ExpiresAt > 0 {
-		base.ExpiresAt = in.ExpiresAt
-	}
-	base.Priority = in.Priority
-	base.Note = in.Note
-	if in.CreatedAt != "" {
-		base.CreatedAt = in.CreatedAt
-	}
-	if in.Enabled != nil {
-		base.Enabled = *in.Enabled
-	}
-	// 额度/签到是账号文件里的运行期快照，重启后要能继续展示，不能被 New() 的默认值盖掉。
-	base.Credit, base.CreditAt, base.CheckedIn = in.Credit, in.CreditAt, in.CheckedIn
-	return base, nil
-}
-
-// LoadDir 读取目录下所有 *.json 账号（单个损坏文件只跳过，不阻塞启动）。
-func LoadDir(dir string) ([]*Auth, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var out []*Auth
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		a, err := Parse(raw)
-		if err != nil {
-			continue
-		}
-		a.path = path
-		out = append(out, a)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].UID < out[j].UID })
-	return out, nil
-}
-
-// Path 返回落盘路径（未设置时为空）。
-func (a *Auth) Path() string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.path
-}
-
-// SetPath 设置落盘路径。
-func (a *Auth) SetPath(p string) {
-	a.mu.Lock()
-	a.path = p
-	a.mu.Unlock()
-}
-
-// Token 返回当前 access token。
-func (a *Auth) Token() string {
+// JWT 返回当前 access token 的读锁快照。
+func (a *Auth) JWT() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.AccessToken
 }
 
-// RefreshValue 返回当前 refresh token。
-func (a *Auth) RefreshValue() string {
+// RefreshTokenValue 返回当前刷新串的读锁快照。
+func (a *Auth) RefreshTokenValue() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.Data.RefreshToken
+	return a.RefreshToken
 }
 
-// Expiry 返回 access token 过期时刻（零值 = 未知）。
-func (a *Auth) Expiry() time.Time {
+// ExpiresAtValue 读 access token 到期时刻（Unix 毫秒）。
+func (a *Auth) ExpiresAtValue() int64 {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	return a.ExpiresAt
+}
+
+// MachineIDValue 读设备指纹的读锁快照。
+func (a *Auth) MachineIDValue() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.MachineID
+}
+
+// Realm 返回地区标识（"global" / "cn"）。空值按国际版处理。
+func (a *Auth) Realm() string {
+	if a.RealmID == RealmCN {
+		return RealmCN
+	}
+	return RealmGlobal
+}
+
+// NeedsRefresh 报告 token 是否将在 within 内过期（无 expiry 一律按需要刷新）。
+func (a *Auth) NeedsRefresh(within time.Duration) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.NeedsRefreshLocked(within)
+}
+
+// NeedsRefreshLocked 是 NeedsRefresh 的持锁内部版本。
+func (a *Auth) NeedsRefreshLocked(within time.Duration) bool {
 	if a.ExpiresAt <= 0 {
-		return time.Time{}
+		return true
 	}
-	return time.UnixMilli(a.ExpiresAt)
+	return time.Now().Add(within).UnixMilli() >= a.ExpiresAt
 }
 
-// NeedsRefresh 报告是否该续期。过期时间未知时不主动刷（上游会在 401 时触发）。
-func (a *Auth) NeedsRefresh(skew time.Duration) bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.RefreshToken == "" || a.ExpiresAt <= 0 {
-		return false
-	}
-	return time.Now().Add(skew).UnixMilli() >= a.ExpiresAt
-}
-
-// ApplyTokens 落新票（refresh 为空表示上游未轮换，沿用旧值）。
-func (a *Auth) ApplyTokens(access, refresh string) {
+// SetTokens 写入一组新凭证（调用方随后负责 SaveAtomic）。
+func (a *Auth) SetTokens(access, refresh string, expiresAtMs int64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if access != "" {
-		a.AccessToken = stripBearer(access)
-		a.ExpiresAt = JWTExpiry(a.AccessToken)
-		if a.UserID == "" {
-			a.UserID = JWTUserID(a.AccessToken)
-		}
-	}
+	a.AccessToken = access
 	if refresh != "" {
-		a.RefreshToken = stripBearer(refresh)
+		a.RefreshToken = refresh
+	}
+	if expiresAtMs > 0 {
+		a.ExpiresAt = expiresAtMs
 	}
 }
 
-// SetCredit 记录额度快照。
-func (a *Auth) SetCredit(c int64) {
+// SetMachineID 换一套设备指纹（调用方随后负责 SaveAtomic）。
+func (a *Auth) SetMachineID(id string) {
 	a.mu.Lock()
-	a.Credit = c
-	a.CreditAt = time.Now().Format(time.RFC3339)
-	a.mu.Unlock()
+	defer a.mu.Unlock()
+	a.MachineID = id
 }
 
-// MarkCheckedIn 记一次签到成功。
-func (a *Auth) MarkCheckedIn() {
-	a.mu.Lock()
-	a.CheckedIn = time.Now().Format("2006-01-02")
-	a.mu.Unlock()
+// PAT 返回刷新串里的 PAT（若是 PAT 型账号）。
+func (a *Auth) PAT() (string, bool) {
+	refresh := a.RefreshTokenValue()
+	if !strings.HasPrefix(refresh, "pat|") {
+		return "", false
+	}
+	value := strings.SplitN(strings.TrimPrefix(refresh, "pat|"), "|", 2)[0]
+	if value == "" {
+		return "", false
+	}
+	return value, true
 }
 
-// Snapshot 返回可序列化副本。
-func (a *Auth) Snapshot() Data {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.Data
-}
-
-// SaveAtomic 原子落盘。路径未设置时写到 dir/uid.json。
-func (a *Auth) SaveAtomic(dir string) error {
-	a.mu.Lock()
-	path := a.path
-	if path == "" && dir != "" {
-		path = filepath.Join(dir, a.UID+".json")
-		a.path = path
-	}
-	snap := a.Data
-	a.mu.Unlock()
-	if path == "" {
-		return fmt.Errorf("账号 %s 没有落盘路径", snap.UID)
-	}
-	data, err := json.MarshalIndent(snap, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".acct-*.tmp")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer os.Remove(name)
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, path)
-}
-
-// stripBearer 去掉 "Bearer " 前缀（粘贴来自抓包，常带前缀）。
-func stripBearer(v string) string {
-	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(v), "Bearer "))
-}
-
-// JWTExpiry 读 JWT payload 的 exp（毫秒）；解不出返回 0。不验签。
-func JWTExpiry(token string) int64 {
-	claims := jwtClaims(token)
-	if claims == nil {
-		return 0
-	}
-	raw, ok := claims["exp"]
-	if !ok {
-		return 0
-	}
-	text := strings.Trim(string(raw), `"`)
-	sec, err := strconv.ParseFloat(text, 64)
-	if err != nil || sec <= 0 {
-		return 0
-	}
-	return int64(sec * 1000)
-}
-
-// JWTUserID 读 JWT payload 里的用户 id；解不出返回空串。
-func JWTUserID(token string) string {
-	claims := jwtClaims(token)
-	if claims == nil {
+// OAuthRefresh 返回设备授权/作业令牌的刷新串；PAT 型账号为空。
+func (a *Auth) OAuthRefresh() string {
+	if _, ok := a.PAT(); ok {
 		return ""
 	}
-	for _, key := range []string{"user_id", "userId", "uid", "userID", "sub"} {
-		raw, ok := claims[key]
-		if !ok {
-			continue
-		}
-		var text string
-		if json.Unmarshal(raw, &text) == nil && text != "" {
-			return text
-		}
-		var num json.Number
-		if json.Unmarshal(raw, &num) == nil && num.String() != "" && num.String() != "0" {
-			return num.String()
+	return strings.SplitN(a.RefreshTokenValue(), "|", 2)[0]
+}
+
+// CanRefresh 表示该账号具备可用的续期手段。
+func (a *Auth) CanRefresh() bool {
+	if _, ok := a.PAT(); ok {
+		return true
+	}
+	return a.OAuthRefresh() != ""
+}
+
+// PackRefresh 把上游返回的刷新令牌打包成「令牌|uid|machineId」。
+func PackRefresh(refresh, uid, machineID string) string {
+	if refresh == "" {
+		return ""
+	}
+	return refresh + "|" + uid + "|" + machineID
+}
+
+// PackPATRefresh 把 PAT 型账号的刷新串重新打包（PAT 与 job refresh 都要保留）。
+func PackPATRefresh(pat, jobRefresh, uid, machineID string) string {
+	return "pat|" + pat + "|" + jobRefresh + "|" + uid + "|" + machineID
+}
+
+// repackRefresh 把刷新串的后缀（uid|machineId）改成当前值，前缀原样保留。
+func repackRefresh(refresh, uid, machineID string) string {
+	if refresh == "" {
+		return ""
+	}
+	parts := strings.Split(refresh, "|")
+	prefix := refresh
+	if len(parts) >= 3 {
+		prefix = strings.Join(parts[:len(parts)-2], "|")
+	}
+	return prefix + "|" + uid + "|" + machineID
+}
+
+// CompleteIdentity 补全用户/设备标识并重写刷新串后缀。
+func (a *Auth) CompleteIdentity(defaultMachineID string) error {
+	if a.UID == "" {
+		return fmt.Errorf("缺少 Qoder 用户标识，请重新登录或粘贴完整账号记录")
+	}
+	if err := validateIdentity(a.UID); err != nil {
+		return err
+	}
+	if a.MachineID == "" {
+		a.MachineID = defaultMachineID
+	}
+	if a.MachineID == "" {
+		return fmt.Errorf("缺少 Qoder 设备标识，请重新登录")
+	}
+	if err := validateIdentity(a.MachineID); err != nil {
+		return err
+	}
+	a.RefreshToken = repackRefresh(a.RefreshToken, a.UID, a.MachineID)
+	if len(a.RefreshToken) > MaxTokenLength {
+		return fmt.Errorf("Qoder 刷新凭证过长")
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 磁盘解析
+
+// record 是落盘与导入共用的字段集（键名与官方客户端/参考实现一致）。
+type record struct {
+	Mode         string          `json:"mode"`
+	Edition      string          `json:"edition"`
+	AccessToken  string          `json:"accessToken"`
+	Access       string          `json:"access"`
+	Token        string          `json:"token"`
+	AccessSnake  string          `json:"access_token"`
+	RefreshToken string          `json:"refreshToken"`
+	Refresh      string          `json:"refresh"`
+	RefreshSnake string          `json:"refresh_token"`
+	PAT          string          `json:"pat"`
+	PersonalTokn string          `json:"personalAccessToken"`
+	ExpiresAt    json.RawMessage `json:"expiresAt"`
+	Expires      json.RawMessage `json:"expires"`
+	ExpiresSnake json.RawMessage `json:"expires_at"`
+	ExpiresToken json.RawMessage `json:"tokenExpiresAt"`
+	UserID       string          `json:"userId"`
+	UserIDSnake  string          `json:"user_id"`
+	UID          string          `json:"uid"`
+	Email        string          `json:"email"`
+	Nickname     string          `json:"nickname"`
+	Name         string          `json:"name"`
+	MachineID    string          `json:"machineId"`
+	MachineSnake string          `json:"machine_id"`
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
 		}
 	}
 	return ""
 }
 
-// jwtClaims 解出 JWT payload 的字段表（base64url，不验签）。
-func jwtClaims(token string) map[string]json.RawMessage {
-	token = stripBearer(token)
-	parts := strings.Split(token, ".")
-	if len(parts) < 2 {
-		return nil
+func stripBearer(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 7 && strings.EqualFold(value[:7], "Bearer ") {
+		return strings.TrimSpace(value[7:])
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		if payload, err = base64.URLEncoding.DecodeString(parts[1]); err != nil {
-			return nil
-		}
-	}
-	var claims map[string]json.RawMessage
-	if json.Unmarshal(payload, &claims) != nil {
-		return nil
-	}
-	return claims
+	return value
 }
 
-// TokenTail 返回 token 末 4 位。
-func TokenTail(token string) string {
-	r := []rune(stripBearer(token))
-	if len(r) <= 6 {
-		return "…"
+// Parse 解析账号内容：磁盘形态与面板粘贴形态共用（字段别名与 Bearer 前缀都吃）。
+func Parse(raw []byte) (*Auth, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("empty auth storage")
 	}
-	return "…" + string(r[len(r)-4:])
+	var rec record
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return nil, fmt.Errorf("storage_parse_error: %w", err)
+	}
+	access := stripBearer(firstNonEmpty(rec.AccessToken, rec.Access, rec.Token, rec.AccessSnake))
+	refresh := firstNonEmpty(rec.RefreshToken, rec.Refresh, rec.RefreshSnake)
+	pat := firstNonEmpty(rec.PAT, rec.PersonalTokn)
+	if pat != "" && !strings.HasPrefix(refresh, "pat|") {
+		// 只给 PAT 的账号：刷新串由上游兑换后补齐，这里先占位，CompleteIdentity 补后缀。
+		refresh = "pat|" + pat
+	}
+	if access == "" && refresh == "" {
+		return nil, fmt.Errorf("parse_error: missing accessToken and refreshToken")
+	}
+	for _, value := range []string{access, refresh} {
+		if len(value) > MaxTokenLength || hasControl(value) {
+			return nil, fmt.Errorf("parse_error: token 过长或包含非法控制字符")
+		}
+	}
+	uid := firstNonEmpty(rec.UserID, rec.UserIDSnake, rec.UID)
+	machine := firstNonEmpty(rec.MachineID, rec.MachineSnake)
+	// 刷新串里打包的 uid / machineId 优先（它们必须与刷新时一致）。
+	parts := strings.Split(refresh, "|")
+	var packedUser, packedMachine string
+	switch {
+	case len(parts) == 5 && parts[0] == "pat":
+		packedUser, packedMachine = parts[3], parts[4]
+	case len(parts) == 3:
+		packedUser, packedMachine = parts[1], parts[2]
+	}
+	if uid != "" && packedUser != "" && uid != packedUser {
+		return nil, fmt.Errorf("parse_error: userId 与刷新凭证里的用户不一致")
+	}
+	if machine != "" && packedMachine != "" && machine != packedMachine {
+		return nil, fmt.Errorf("parse_error: machineId 与刷新凭证里的设备不一致")
+	}
+	if uid == "" {
+		uid = packedUser
+	}
+	if machine == "" {
+		machine = packedMachine
+	}
+	a := &Auth{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		RealmID:      realmOf(firstNonEmpty(rec.Mode, rec.Edition)),
+		MachineID:    machine,
+		UID:          uid,
+		Nickname:     firstNonEmpty(rec.Nickname, rec.Name),
+		Email:        strings.TrimSpace(rec.Email),
+	}
+	for _, raw := range []json.RawMessage{rec.ExpiresAt, rec.Expires, rec.ExpiresSnake, rec.ExpiresToken} {
+		if ms := timestampMillis(raw); ms != nil {
+			a.ExpiresAt = *ms
+			break
+		}
+	}
+	for _, value := range []string{a.UID, a.MachineID} {
+		if value != "" {
+			if err := validateIdentity(value); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return a, nil
+}
+
+// realmOf 把 mode/edition 字符串归一成地区标识：空 / global / intl → 国际版，cn → 国内版。
+func realmOf(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case RealmCN, "china":
+		return RealmCN
+	default:
+		return RealmGlobal
+	}
+}
+
+func validateIdentity(value string) error {
+	if len(value) > 256 || strings.Contains(value, "|") || hasControl(value) {
+		return fmt.Errorf("Qoder 用户或设备标识无效")
+	}
+	return nil
+}
+
+func hasControl(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// timestampMillis 把数字/数字字符串/RFC3339 归一成毫秒时间戳；0 与 null 视为「没有」。
+func timestampMillis(raw json.RawMessage) *int64 {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var num float64
+	if err := json.Unmarshal(raw, &num); err == nil {
+		return normalizeMillis(int64(num))
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return nil
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, text); err == nil {
+		ms := parsed.UnixMilli()
+		return &ms
+	}
+	var asInt int64
+	if _, err := fmt.Sscanf(text, "%d", &asInt); err == nil {
+		return normalizeMillis(asInt)
+	}
+	return nil
+}
+
+func normalizeMillis(value int64) *int64 {
+	if value <= 0 {
+		return nil
+	}
+	if value < 100_000_000_000 { // 秒 → 毫秒
+		value *= 1000
+	}
+	return &value
+}
+
+// SaveAtomic 以磁盘形态原子写回 FilePath（tmp + rename，0600）。
+func (a *Auth) SaveAtomic() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.saveAtomicLocked()
+}
+
+func (a *Auth) saveAtomicLocked() error {
+	if a.FilePath == "" {
+		return fmt.Errorf("no FilePath set")
+	}
+	var expires any
+	if a.ExpiresAt > 0 {
+		expires = a.ExpiresAt
+	}
+	doc := map[string]any{
+		"mode":         a.Realm(),
+		"accessToken":  a.AccessToken,
+		"refreshToken": a.RefreshToken,
+		"expiresAt":    expires,
+		"userId":       a.UID,
+		"email":        a.Email,
+		"nickname":     a.Nickname,
+		"machineId":    a.MachineID,
+	}
+	raw, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	// 同一个文件可能被两个不同的 *Auth 对象写（面板登录新建的 vs 池里的），
+	// 对象级锁保护不到；临时名带 pid + 序号，避免互相截断成半截 JSON。
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", a.FilePath, os.Getpid(), tmpSeq.Add(1))
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, a.FilePath); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// LoadDir 扫描 dir 下 qoder-*.json。解析失败的文件跳过并留日志（静默跳过 = 账号凭空消失）。
+// 不用 filepath.Glob：目录名带 [ ] * ? 时 Glob 会当模式解析。
+func LoadDir(dir string) ([]*Auth, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []*Auth
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, "qoder-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		f := filepath.Join(dir, name)
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			log.Printf("[auth] 读不到账号文件 %s，跳过: %v", f, err)
+			continue
+		}
+		a, err := Parse(raw)
+		if err != nil {
+			log.Printf("[auth] 账号文件 %s 解析失败，跳过: %v", f, err)
+			continue
+		}
+		if a.UID == "" {
+			// 池按 uid 建索引：空 uid 的两个文件会互相覆盖，只剩一个号。
+			a.UID = strings.TrimSuffix(strings.TrimPrefix(name, "qoder-"), ".json")
+			log.Printf("[auth] %s 里没有 uid，按文件名补成 %q", f, a.UID)
+		}
+		a.FilePath = f
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// FileNameFor 是账号落盘文件名（按 uid 稳定，便于人工核对）。
+func FileNameFor(uid string) string {
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		}
+		return '_'
+	}, uid)
+	return "qoder-" + safe + ".json"
 }

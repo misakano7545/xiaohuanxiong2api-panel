@@ -54,7 +54,8 @@ func responsesToChat(src []byte) ([]byte, *responsesMeta, error) {
 		"model", "stream", "tool_choice", "max_tokens", "max_output_tokens",
 		"max_completion_tokens", "temperature", "top_p", "user", "n", "stop",
 		"metadata", "stream_options", "parallel_tool_calls",
-		// 小浣熊不认 max_context；放进白名单只是为了原样透传，不静默丢字段。
+		// Max 档：与 /v1/chat/completions 同一语义（出站换 __max 变体 + Max 面）。
+		// 不进白名单就会被静默丢掉，客户端以为开了大窗口、实际拿的是 dev 档。
 		"max_context",
 		// ponytail: Codex 客户端按会话发 prompt_cache_key；丢掉就只能靠内容派生会话键。
 		"prompt_cache_key",
@@ -802,8 +803,9 @@ func convertUsage(u map[string]any) map[string]any {
 		out["total_tokens"] = v
 	}
 	// ponytail: Responses 客户端的缓存读数在 input_tokens_details.cached_tokens
-	// （Codex 据此显示 cached）。上游的真实命中数可能在 cache_read_input_tokens，
-	// 也可能在 prompt_tokens_details.cached_tokens，两个方言都认。没有该字段就不写，
+	// （Codex 据此显示 cached）。SOLO 上游的真实命中数在 cache_read_input_tokens
+	// （实测 2026-09-28：cache_read=45 / prompt=45）；WorkBuddy 系上游给的是
+	// prompt_tokens_details.cached_tokens，两个方言都认。没有该字段就不写，
 	// 不拿 0 冒充「没命中」。
 	if v, ok := u["cache_read_input_tokens"]; ok && v != nil {
 		out["input_tokens_details"] = map[string]any{"cached_tokens": v}

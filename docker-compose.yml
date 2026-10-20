@@ -1,15 +1,15 @@
 services:
-  xhx2api:
+  q2api:
     build: .
-    image: xiaohuanxiong2api-panel:local
-    container_name: xhx2api
+    container_name: qoder2api-panel
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:7867:7867"
     environment:
-      LISTEN: "0.0.0.0:7867"
-      API_KEY: "${API_KEY:-}"
-      TZ: Asia/Shanghai
+      - TZ=Asia/Shanghai
+    ports:
+      - "7864:7864"
     volumes:
       - ./auths:/app/auths
-      - ./config.json:/app/config.json:ro
+      - ./data:/app/data
+      # api_key（以及其它配置）只认 config.json，面板「配置」页改的就是这一份。
+      # 必须挂出来：不挂的话容器重建就把面板里改过的密钥丢了。宿主机先 cp config.example.json config.json。
+      - ./config.json:/app/config.json

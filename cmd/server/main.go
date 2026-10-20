@@ -1,195 +1,278 @@
-// Command server 是小浣熊 OpenAI 兼容反代：单二进制 + 内嵌管理面板。
+// main.go qoder2api-panel 入口：加载配置 → 构建 pool → 起 HTTP 服务。
 package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
-	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/config"
-	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/panel"
-	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/pool"
-	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/reqlog"
-	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/server"
-	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/upstream"
+	"github.com/misakano7545/qoder2api-panel/internal/auth"
+	"github.com/misakano7545/qoder2api-panel/internal/panel"
+	"github.com/misakano7545/qoder2api-panel/internal/pool"
+	"github.com/misakano7545/qoder2api-panel/internal/reqlog"
+	"github.com/misakano7545/qoder2api-panel/internal/scheduler"
+	"github.com/misakano7545/qoder2api-panel/internal/server"
+	"github.com/misakano7545/qoder2api-panel/internal/session"
+	"github.com/misakano7545/qoder2api-panel/internal/upstream"
+	"github.com/misakano7545/qoder2api-panel/internal/usage"
 )
 
-// version 由构建时 -ldflags "-X main.version=…" 注入。
-var version = "0.1.0"
+// appVersion 面板版本，透出到 /panel/api/overview 的 version（与 workbuddy2api-panel 同口径）。
+// 本地构建/源码跑显示 dev；发版由 CI 用 -X main.appVersion=<tag 版本> 注入。
+var appVersion = "dev"
+
+// limitsOf 把配置翻成池参数（唯一转换点：启动与热改走同一个函数，不会两处漂移）。
+func limitsOf(c *Config) pool.Limits {
+	return pool.Limits{
+		MaxInFlight:        c.Pool.MaxInFlight,
+		BreakerThreshold:   c.Pool.BreakerThreshold,
+		BreakerCooldown:    c.BreakerCooldownDur,
+		BreakerCooldownMax: c.BreakerCooldownMaxD,
+		DegradeThreshold:   c.Pool.DegradeThreshold,
+		DegradeCooldown:    c.DegradeCooldownDur,
+		DegradeCooldownMax: c.DegradeCooldownMaxD,
+		IdleWeightPerHour:  c.Pool.IdleWeightPerHour,
+		IdleWeightMax:      c.Pool.IdleWeightMax,
+		ExpiringSoon:       c.ExpiringSoonDur,
+		PlanCooldown:       c.PlanCreditDur,
+		SoftCooldown:       c.SoftRateDur,
+		SoftCooldownMax:    c.SoftRateMaxDur,
+	}
+}
+
+// applyUpstream 出站身份与超时（启动与热改共用）。
+func applyUpstream(up *upstream.Client, c *Config) {
+	up.SetTimeouts(
+		time.Duration(c.Upstream.TimeoutSeconds)*time.Second,
+		time.Duration(c.Upstream.HeaderTimeoutSeconds)*time.Second,
+		time.Duration(c.Upstream.IdleTimeoutSeconds)*time.Second,
+	)
+	up.SetIdentity(c.Upstream.UserAgent, c.Upstream.ClientVersion)
+	// 网关基址：显式配置优先，留空回落内置常量。这里**必须显式写回**（不能只在非空时
+	// 赋值）：否则面板里清空该项后旧值会留在结构体里，用户以为清掉了其实没有。
+	// 写侧走 SetAgentHosts：请求路径在并发读这两个字段（applyUpstream 是热路径）。
+	global, cn := c.Upstream.GatewayHost, c.Upstream.GatewayHostCN
+	if global == "" {
+		global = upstream.AgentHost
+	}
+	if cn == "" {
+		cn = upstream.GatewayCN
+	}
+	up.SetAgentHosts(global, cn)
+}
+
+// usagePathFor 由 state 文件路径推出用量台账路径：同目录、文件名 usage.json。
+// 这样 config 里改 state_file 时用量数据跟着走，不用多加一个配置项。
+func usagePathFor(stateFile string) string { return stateSibling(stateFile, "usage.json") }
+
+// requestArchiveDir 请求归档目录：显式配置优先，否则 state 文件同级的 requests/。
+func requestArchiveDir(cfg *Config) string {
+	if d := cfg.Logging.RequestArchiveDir; d != "" {
+		return d
+	}
+	return stateSibling(cfg.StateFile, "requests")
+}
+
+// stateSibling 返回与 state 文件同目录的指定文件名路径（相对路径场景回落当前目录）。
+func stateSibling(stateFile, name string) string {
+	dir := filepath.Dir(stateFile)
+	if dir == "" || dir == "." {
+		return name
+	}
+	return filepath.Join(dir, name)
+}
 
 func main() {
-	cfgPath := flag.String("config", envOr("CONFIG", "./config.json"), "配置文件路径（不存在时按环境变量启动）")
-	showVersion := flag.Bool("version", false, "打印版本号后退出")
+	cfgPath := flag.String("config", "config.json", "path to config json")
 	flag.Parse()
-	if *showVersion {
-		fmt.Println(version)
-		return
-	}
 
-	cfg, err := config.Load(*cfgPath)
+	logs := panel.NewRing(400)
+	log.SetOutput(io.MultiWriter(os.Stderr, logs))
+
+	// 首次运行自动落一份推荐配置（后面改配置就有文件可编辑/可版本化）。
+	if *cfgPath != "" {
+		if _, statErr := os.Stat(*cfgPath); os.IsNotExist(statErr) {
+			key, err := WriteDefault(*cfgPath)
+			if err != nil {
+				log.Printf("生成默认配置 %s 失败（继续用内置默认值）: %v", *cfgPath, err)
+			} else {
+				log.Printf("首次运行：已生成默认配置 %s（已随机生成 api_key）", *cfgPath)
+				// 密钥只写 stderr，不进日志环：面板的日志视图里不该出现可用于登录的密钥
+				// （环里的脱敏规则是兜底，不是许可）。journalctl / 终端里能看到。
+				fmt.Fprintf(os.Stderr, "api_key = %s   （写在 %s 的 api_key 里，也可在面板里改）\n", key, *cfgPath)
+			}
+		}
+	}
+	cfg, err := Load(*cfgPath)
 	if err != nil {
-		log.Fatalf("配置错误: %v", err)
-	}
-	if cfg.APIKey == "" && !isLoopback(cfg.Listen) {
-		log.Printf("警告: listen=%s 且 api_key 为空，任何能访问该端口的人都能消耗你的小浣熊额度", cfg.Listen)
+		log.Fatalf("load config: %v", err)
 	}
 
-	accounts, err := auth.LoadDir(cfg.AuthDir)
+	// 账号目录不存在就先建出来：首跑没有账号是正常状态（面板里添加），
+	// 不该因此起不来。
+	if err := os.MkdirAll(cfg.AuthDir, 0o700); err != nil {
+		log.Fatalf("创建账号目录 %s: %v", cfg.AuthDir, err)
+	}
+	auths, err := auth.LoadDir(cfg.AuthDir)
 	if err != nil {
-		log.Fatalf("读取账号目录 %s: %v", cfg.AuthDir, err)
+		log.Fatalf("load auths: %v", err)
 	}
-	accountPool := pool.New(accounts, cfg.Cooldown())
-	client := upstream.New(upstream.Options{
-		LLMBase:    strings.TrimRight(cfg.Upstream.LLMBase, "/"),
-		AuthBase:   strings.TrimRight(cfg.Upstream.AuthBase, "/"),
-		PointsBase: strings.TrimRight(cfg.Upstream.PointsBase, "/"),
-		Origin:     strings.TrimRight(cfg.Upstream.Origin, "/"),
-		UserAgent:  cfg.Upstream.UserAgent,
-		Connect:    time.Duration(cfg.Upstream.ConnectSeconds) * time.Second,
-		Header:     time.Duration(cfg.Upstream.HeaderSeconds) * time.Second,
-		Total:      time.Duration(cfg.Upstream.TotalSeconds) * time.Second,
-	})
-	reqLog := reqlog.New(500)
-
-	adminKey := cfg.AdminKey
-	if adminKey == "" {
-		adminKey = cfg.APIKey
+	log.Printf("loaded %d account(s) from %s", len(auths), cfg.AuthDir)
+	if len(auths) == 0 {
+		log.Printf("还没有账号：打开面板 → 账号 → 添加账号（浏览器授权或 PAT 导入）")
 	}
-	ui := panel.New(panel.Config{
-		Pool: accountPool, Upstream: client, AuthDir: cfg.AuthDir,
-		AdminKey: adminKey, APIKey: cfg.APIKey, Log: reqLog, Version: version,
-		Checkin: cfg.Schedule.CheckinEnabled,
+
+	bound := cfg.Clone()
+	var cfgMu sync.Mutex
+
+	p := pool.New(cfg.StateFile)
+	p.ApplyLimits(limitsOf(cfg))
+	p.SyncToDir(auths) // 对齐：剔除 state.json 中已删除 auth 文件的幽灵账号
+
+	// 用量台账：进程内累计 + 防抖原子落盘，面板「用量」视图读它。
+	usagePath := usagePathFor(cfg.StateFile)
+	rec := usage.New(usagePath)
+	rec.Start()
+	defer rec.Stop()
+	log.Printf("[usage] 用量台账 %s（%s）", usagePath, rec.Describe())
+
+	// 请求记录：内存指标 + 可选 JSONL 归档（面板「运行日志」页的请求记录）。
+	// 归档目录缺省为 state 文件同级的 requests/（改 state_file 即跟着搬）。
+	rlog := reqlog.New(reqlog.Config{
+		Dir:           requestArchiveDir(cfg),
+		Enabled:       cfg.Logging.RequestArchiveEnabled,
+		RetentionDays: cfg.Logging.RequestArchiveRetentionDays,
+		MaxBytes:      int64(cfg.Logging.RequestArchiveMaxMB) << 20,
+	})
+	defer rlog.Close()
+	if cfg.Logging.RequestArchiveEnabled {
+		log.Printf("[reqlog] 请求归档 %s（保留 %d 天 / 上限 %d MB）", requestArchiveDir(cfg),
+			cfg.Logging.RequestArchiveRetentionDays, cfg.Logging.RequestArchiveMaxMB)
+	} else {
+		log.Printf("[reqlog] 请求记录仅存内存（最近 100 条）；开启 logging.request_archive_enabled 可跨重启保留")
+	}
+
+	up := upstream.New()
+	applyUpstream(up, cfg)
+
+	// 会话粘性：同一会话的多轮请求粘同一账号（上游 prompt 缓存命中）。
+	sess := session.New(session.Config{
+		Enabled:    cfg.SessionSticky.Enabled,
+		TTL:        cfg.SessionTTL,
+		GCInterval: cfg.SessionGCInterval,
+	})
+	defer sess.Stop()
+
+	sch := scheduler.New(scheduler.Config{
+		Pool:                   p,
+		Upstream:               up,
+		CheckinHours:           cfg.Schedule.CheckinHours,
+		KeepaliveHours:         cfg.Schedule.KeepaliveHours,
+		CheckinEnabled:         cfg.Schedule.CheckinEnabled,
+		KeepaliveEnabled:       cfg.Schedule.KeepaliveEnabled,
+		BalanceRefreshInterval: cfg.BalanceRefreshInt,
 	})
 
-	handler := server.NewHandler(server.Config{
-		Pool: accountPool, Upstream: client, AuthDir: cfg.AuthDir,
-		APIKey: cfg.APIKey, MaxRotate: cfg.Pool.MaxRotate, RefreshSkew: cfg.RefreshSkew(),
-		DefaultModel: cfg.DefaultModel, Models: cfg.Models,
-		Log: reqLog, Panel: ui, Version: version,
+	h := server.NewHandler(server.Config{
+		Pool:              p,
+		Upstream:          up,
+		APIKey:            cfg.APIKey,
+		DefaultModel:      cfg.DefaultModel,
+		PromptMode:        cfg.Prompt.Mode,
+		PromptText:        cfg.PromptText,
+		Session:           sess,
+		Usage:             rec,
+		RequestLog:        rlog,
+		RequestClientInfo: cfg.Logging.RequestClientInfo,
 	})
+	var pn *panel.Panel // 先声明：SaveConfig 闭包里要调 pn.ApplyAPIKey，赋值在这之后
+	pn = panel.New(panel.Config{
+		Pool:       p,
+		Upstream:   up,
+		Scheduler:  sch,
+		AuthDir:    cfg.AuthDir,
+		APIKey:     cfg.APIKey,
+		BindAll:    bindsAllInterfaces(cfg.Listen),
+		Version:    appVersion,
+		Logs:       logs,
+		Models:     h.Models,
+		Usage:      rec,
+		RequestLog: rlog,
+		ConfigPath: *cfgPath,
+		LoadConfig: func() (any, error) {
+			cfgMu.Lock()
+			defer cfgMu.Unlock()
+			// 如实回显整份配置（含 api_key）：面板显示的就是 config.json 的内容。
+			return cfg.Clone(), nil
+		},
+		SaveConfig: func(raw []byte) ([]string, error) {
+			cfgMu.Lock()
+			defer cfgMu.Unlock()
+			next, err := ParseBody(cfg, raw)
+			if err != nil {
+				return nil, err
+			}
+			path := *cfgPath
+			if path == "" {
+				path = "config.json"
+			}
+			if err := SaveFile(path, next); err != nil {
+				return nil, err
+			}
+			*cfg = *next
+			// 热生效：池参数、运行期设置、出站身份/超时、会话粘性开关。
+			// 排程（时点/开关/余额周期）不走这里，如实报"需重启"（RestartFields）。
+			p.ApplyLimits(limitsOf(next))
+			h.ApplyRuntime(server.Runtime{
+				DefaultModel: next.DefaultModel,
+				PromptMode:   next.Prompt.Mode,
+				PromptText:   next.PromptText,
+				APIKey:       next.APIKey,
+			})
+			pn.ApplyAPIKey(next.APIKey) // 面板自己也认新密钥，否则保存完就把自己挡在门外
+			applyUpstream(up, next)
+			sess.Apply(session.Config{Enabled: next.SessionSticky.Enabled, TTL: next.SessionTTL})
+			// 来源记录开关是热项（每次请求现读）；归档段需重启，由 RestartFields 如实报出。
+			h.SetRequestClientInfo(next.Logging.RequestClientInfo)
+			return RestartFields(bound, next), nil
+		},
+	})
+	h.MountPanel(pn)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go sch.Run(ctx)
+	// 启动补跑：排程定在 9 点而进程 10 点才起来是常态，不补跑等于当天整天不签。
+	go sch.CatchUp()
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           handler,
-		ReadHeaderTimeout: 15 * time.Second,
-		IdleTimeout:       5 * time.Minute,
+		Handler:           h,
+		ReadHeaderTimeout: 30 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	go maintain(ctx, cfg, accountPool, client)
-
-	log.Printf("xhx2api-panel %s 监听 %s，账号 %d（auths=%s）", version, cfg.Listen, len(accounts), cfg.AuthDir)
-	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
 	}()
-	select {
-	case err := <-errCh:
-		log.Fatalf("监听失败: %v", err)
-	case <-ctx.Done():
-	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
-	log.Printf("已退出")
-}
 
-// maintain 跑后台维护：每日签到 + 定期刷额度。定时器粒度 1 分钟，
-// 到点的判断做成幂等（今天签过就跳过），所以重复触发不会重复调上游。
-func maintain(ctx context.Context, cfg config.Config, p *pool.Pool, up *upstream.Client) {
-	balanceTick := time.NewTicker(time.Duration(max(cfg.Schedule.BalanceMinutes, 5)) * time.Minute)
-	defer balanceTick.Stop()
-	m := time.NewTicker(time.Minute)
-	defer m.Stop()
-
-	lastCheckin := ""
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-m.C:
-			if !cfg.Schedule.CheckinEnabled {
-				continue
-			}
-			now := time.Now()
-			today := now.Format("2006-01-02")
-			if lastCheckin == today || !hourWanted(now.Hour(), cfg.Schedule.CheckinHours) {
-				continue
-			}
-			lastCheckin = today
-			for _, acct := range p.Accounts() {
-				if !acct.Enabled || acct.CheckedIn == today {
-					continue
-				}
-				cctx, cancel := context.WithTimeout(ctx, 25*time.Second)
-				err := up.ClaimDailyGrant(cctx, acct.Token())
-				cancel()
-				if err != nil {
-					log.Printf("签到失败 uid=%s: %v", acct.UID, err)
-					continue
-				}
-				acct.MarkCheckedIn()
-				if err := acct.SaveAtomic(cfg.AuthDir); err != nil {
-					log.Printf("签到状态落盘失败 uid=%s: %v", acct.UID, err)
-				}
-			}
-		case <-balanceTick.C:
-			for _, acct := range p.Accounts() {
-				cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-				bal, err := up.Balance(cctx, acct.Token())
-				cancel()
-				if err != nil {
-					continue
-				}
-				acct.SetCredit(bal.Available)
-			}
-		}
+	host := cfg.Listen
+	if strings.HasPrefix(host, ":") {
+		host = "127.0.0.1" + host
 	}
-}
-
-func hourWanted(hour int, hours []int) bool {
-	if len(hours) == 0 {
-		return false
+	log.Printf("qoder2api-panel listening on %s (api_key=%v) panel http://%s/panel/", cfg.Listen, cfg.APIKey != "", host)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("http: %v", err)
 	}
-	for _, h := range hours {
-		if h == hour {
-			return true
-		}
-	}
-	return false
-}
-
-func envOr(key, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func isLoopback(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return false
-	}
-	if host == "" {
-		return false
-	}
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	log.Printf("bye")
 }
