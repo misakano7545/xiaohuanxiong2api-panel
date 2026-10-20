@@ -164,6 +164,15 @@ func nextFire(now time.Time, hours []int) time.Time {
 	return earliest
 }
 
+// shanghaiTZ 固定东八区：上游的「今天」按北京时间算，而进程可能跑在 UTC/别的时区，
+// 用 time.Local 会在境外服务器上把「今天」算错一天（每日积分 00:00 发放的边界就在那儿）。
+var shanghaiTZ = time.FixedZone("CST", 8*3600)
+
+// sameDayShanghai 两个时刻是否落在同一个北京日期。
+func sameDayShanghai(a, b time.Time) bool {
+	return a.In(shanghaiTZ).Format("2006-01-02") == b.In(shanghaiTZ).Format("2006-01-02")
+}
+
 // Run 主循环，阻塞直到 ctx 取消；余额刷新与补签扫描各起一条循环（周期与整点无关）。
 //
 // 排程可以热改（ApplySchedule 关旧 wakeCh 换代 → 下面的 <-wake 立刻返回）：收到就丢掉旧计划、
@@ -575,8 +584,19 @@ func (s *Scheduler) CheckinUID(uid string) (CheckinResult, error) {
 				checkinErr = fmt.Errorf("签到复核失败：%w", verr)
 				log.Printf("checkin verify %s: %v", uid, verr)
 			} else if !verified {
-				checkinErr = &upstream.BusinessError{Message: "签到复核未通过：上游仍报未签到"}
-				log.Printf("checkin verify %s: status still checked_in=false", uid)
+				// 当天新注册的号：每日积分发放是上游 00:00 的定时任务，今天这批根本还没发，
+				// bills 里不会有 daily_grant。这不是签到失败（claim 该拿的登录奖励已拿到），
+				// 报 failed 还会给它记一次 5 分钟签到冷却、把面板刷成一脸错。
+				if created, ok := s.cfg.Upstream.UserCreatedAt(a); ok && sameDayShanghai(created, time.Now()) {
+					res.Status = "pending"
+					res.Reason = "上游今日尚未发放每日积分（" + created.In(shanghaiTZ).Format("2006-01-02 15:04") +
+						" 注册的新号，首批在次日 00:00 发放）"
+					log.Printf("checkin %s: pending（%s 注册的新号，等次日 00:00 首批每日积分）",
+						uid, created.In(shanghaiTZ).Format("2006-01-02 15:04"))
+				} else {
+					checkinErr = &upstream.BusinessError{Message: "签到复核未通过：上游仍报未签到"}
+					log.Printf("checkin verify %s: status still checked_in=false", uid)
+				}
 			} else {
 				res.Status, res.Credits = "ok", reward
 				log.Printf("checkin %s: ok +%d", uid, reward)

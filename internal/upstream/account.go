@@ -203,6 +203,36 @@ var shanghaiTZ = func() *time.Location {
 	return time.FixedZone("CST", 8*3600)
 }()
 
+// UserCreatedAt 取账号注册时间（东八区语义由调用方解释）。
+//
+// 只用来区分「上游今天还没发每日积分」和「签到了但没落账」：小浣熊的每日积分发放是
+// 服务端 00:00 的定时任务，当天新注册的号要等次日首批，此前 bills 里根本没有
+// daily_grant——那不是签到失败，是还没到发放时点。
+func (c *Client) UserCreatedAt(a *auth.Auth) (time.Time, bool) {
+	if a == nil || a.JWT() == "" {
+		return time.Time{}, false
+	}
+	resp, err := c.doJSON(http.MethodGet, c.authBase()+UserInfoPath, nil,
+		map[string]string{"Accept": "application/json", "Authorization": "Bearer " + a.JWT()})
+	if err != nil {
+		return time.Time{}, false
+	}
+	data, err := payloadOf(resp, "用户资料")
+	if err != nil {
+		return time.Time{}, false
+	}
+	raw := text(data, "created_at", "register_time", "createdAt")
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05"} {
+		if t, perr := time.Parse(layout, raw); perr == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
 // CheckinStatus 查「今日每日发放是否已到账」：口径是 bills 流水里今天有没有
 // daily_grant；流水查不到时退回余额的 daily_points>0。credits=可用积分，
 // enable=账号可用（余额 0 且今日无发放说明额度耗尽，交由调度器判断）。

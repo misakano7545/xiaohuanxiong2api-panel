@@ -1833,6 +1833,8 @@ function boot() {
 function checkinMsg(rs, accounts) {
   const ok = rs.filter(r => r.status === 'ok' && r.credits > 0);
   const already = rs.filter(r => r.status === 'already').length;
+  // pending：当天新注册的号，上游这一天还没发过每日积分（首批在次日 00:00），不是失败。
+  const pending = rs.filter(r => r.status === 'pending');
   if (!rs.length) {
     // 冷却中的账号会被自动签到跳过（避免对拥塞的上游连打），这不是成功也不是失败。
     const cool = (accounts || []).filter(a => a.checkin_cooling && !a.disabled).length;
@@ -1849,6 +1851,11 @@ function checkinMsg(rs, accounts) {
     msg = '签到完成，本次没有新增积分';
   }
   if (ok.length && already) msg += '，另有 ' + already + ' 个今天已签';
+  if (pending.length) {
+    msg += (msg.slice(-1) === '分' || msg.slice(-1) === '签' ? '；' : '') +
+      pending.length + ' 个新号今日无每日积分可领（上游次日 00:00 首批）：' +
+      pending.map(r => r.nickname || r.uid).join('、');
+  }
   return msg;
 }
 
