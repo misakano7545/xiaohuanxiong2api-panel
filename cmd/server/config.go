@@ -18,7 +18,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -526,8 +525,9 @@ func ParseBody(base *Config, raw []byte) (*Config, error) {
 
 // RestartFields 列出改了也不会热生效的字段。
 //
-// 排程整段都在这里：签到时点/开关/周期刷新是 scheduler 启动时读的（没有运行时 setter），
-// 面板如实提示"改动需重启"，而不是假装立即生效。会话 GC 周期同理。
+// 排程（checkin/keepalive 的时点与开关、余额刷新周期）**不在**这里：它们走
+// Scheduler.ApplySchedule 热生效。剩下的都是进程级对象：监听地址、目录、状态文件、
+// 会话 GC 周期（session 启动时建的 ticker）、请求归档（reqlog.New 之后不再重配）。
 func RestartFields(bound, next *Config) []string {
 	out := []string{}
 	if bound == nil || next == nil {
@@ -541,22 +541,6 @@ func RestartFields(bound, next *Config) []string {
 	}
 	if next.StateFile != bound.StateFile {
 		out = append(out, "state_file")
-	}
-	if !slices.Equal(next.Schedule.CheckinHours, bound.Schedule.CheckinHours) {
-		out = append(out, "schedule.checkin_hours")
-	}
-	if !slices.Equal(next.Schedule.KeepaliveHours, bound.Schedule.KeepaliveHours) {
-		out = append(out, "schedule.keepalive_hours")
-	}
-	if next.Schedule.CheckinEnabled != bound.Schedule.CheckinEnabled {
-		out = append(out, "schedule.checkin_enabled")
-	}
-	if next.Schedule.KeepaliveEnabled != bound.Schedule.KeepaliveEnabled {
-		out = append(out, "schedule.keepalive_enabled")
-	}
-	if next.Schedule.BalanceRefreshEnabled != bound.Schedule.BalanceRefreshEnabled ||
-		next.Schedule.BalanceRefreshMinutes != bound.Schedule.BalanceRefreshMinutes {
-		out = append(out, "schedule.balance_refresh")
 	}
 	if next.SessionSticky.GCInterval != bound.SessionSticky.GCInterval {
 		out = append(out, "session_sticky.gc_interval")

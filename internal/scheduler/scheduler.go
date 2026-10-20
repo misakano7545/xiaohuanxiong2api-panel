@@ -22,8 +22,8 @@ import (
 
 // Config 调度器依赖。
 //
-// 时点集合与开关在 New 时定下（面板改排程要重启，见 RestartFields）：
-// 排程是低频且"改错代价大"的配置，做成热生效反而容易让人误判当前生效值。
+// 时点集合与开关在 New 时定下，之后可以整体热替换（见 ApplySchedule）：面板保存配置时
+// 调它，Run 里的等待会被唤醒并按新排程重算下一次时点，不需要重启进程。
 type Config struct {
 	Pool     *pool.Pool
 	Upstream *upstream.Client
@@ -48,6 +48,11 @@ var (
 type Scheduler struct {
 	cfg Config
 	mu  sync.RWMutex
+	// wake 排程变更广播：ApplySchedule 关掉旧 chan 并换一个新的，所有等待者同时醒来。
+	// 不用「带缓冲的 chan + 非阻塞发」：主循环、余额循环、补签循环三处都在等它，
+	// 单 token 会被其中一个抢走、另两个白等一轮（实测第二次保存没有重排）。
+	wakeMu sync.Mutex
+	wakeCh chan struct{}
 	// checkinLock / refreshLock 单飞锁：整点时点、每小时补签 ticker、面板按钮、启动补跑
 	// 都可能同时进来。同一账号被两路送进 claim = 秒级二次 claim，而上游原注释说
 	// 「秒级内的第二次 claim 会延长限流窗口」——所以同一任务同时只允许一轮。
@@ -63,7 +68,33 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.KeepaliveHours) == 0 {
 		cfg.KeepaliveHours = []int{3}
 	}
-	return &Scheduler{cfg: cfg}
+	return &Scheduler{cfg: cfg, wakeCh: make(chan struct{})}
+}
+
+// wakeup 取当前这一代的广播通道（每轮循环都要重新取，否则换代后等的还是已关闭的旧 chan）。
+func (s *Scheduler) wakeup() <-chan struct{} {
+	s.wakeMu.Lock()
+	defer s.wakeMu.Unlock()
+	return s.wakeCh
+}
+
+// ApplySchedule 热替换排程（面板保存配置后调用），并广播给运行中的循环。
+//
+// 只换排程段：Pool/Upstream 是进程级依赖，不随配置改。时点落盘前已由 config 层校验
+// （0-23、关闭的任务允许时点非法），这里不再二次校验。
+func (s *Scheduler) ApplySchedule(checkinEnabled bool, checkinHours []int,
+	keepaliveEnabled bool, keepaliveHours []int, balanceInterval time.Duration) {
+	s.mu.Lock()
+	s.cfg.CheckinEnabled = checkinEnabled
+	s.cfg.CheckinHours = append([]int(nil), checkinHours...)
+	s.cfg.KeepaliveEnabled = keepaliveEnabled
+	s.cfg.KeepaliveHours = append([]int(nil), keepaliveHours...)
+	s.cfg.BalanceRefreshInterval = balanceInterval
+	s.mu.Unlock()
+	s.wakeMu.Lock()
+	close(s.wakeCh)
+	s.wakeCh = make(chan struct{})
+	s.wakeMu.Unlock()
 }
 
 // allHours 当前启用的全部触发时点（两个任务都关掉时为空 → 主循环无事可做）。
@@ -133,35 +164,61 @@ func nextFire(now time.Time, hours []int) time.Time {
 	return earliest
 }
 
-// Run 主循环，阻塞直到 ctx 取消；余额刷新另起一条 ticker（周期与整点无关）。
+// Run 主循环，阻塞直到 ctx 取消；余额刷新与补签扫描各起一条循环（周期与整点无关）。
+//
+// 排程可以热改（ApplySchedule 关旧 wakeCh 换代 → 下面的 <-wake 立刻返回）：收到就丢掉旧计划、
+// 按新排程重算下一次时点。wake 每轮都要重新取（wakeup()），否则换代后等的还是已关闭的旧 chan。
+// 注意 next 从**上一个计划时点**推进而不是每轮 time.Now()：任务耗时跨过相邻两档时点时，
+// 用墙上时间重算会看到「下一档已经过去」直接跳到次日，把中间那档静默吞掉。
 func (s *Scheduler) Run(ctx context.Context) {
-	s.mu.RLock()
-	balance := s.cfg.BalanceRefreshInterval
-	s.mu.RUnlock()
-	if balance > 0 {
-		go s.runBalanceLoop(ctx, balance)
-	}
-	s.mu.RLock()
-	checkinOn := s.cfg.CheckinEnabled
-	s.mu.RUnlock()
-	if checkinOn {
-		go s.runCheckinRetryLoop(ctx)
-	}
-	hours := s.allHours()
-	if len(hours) == 0 {
-		// 两个任务都关了：没有时点要等，直接躺到退出（别空转 nextFire）。
-		<-ctx.Done()
-		return
-	}
-	// 从**计划时点**推进而不是每轮 time.Now()：任务耗时跨过相邻两档时点时，用墙上时间
-	// 重算 nextFire 会看到「下一档已经过去」，直接跳到次日，把中间那档静默吞掉。
-	next := nextFire(time.Now(), hours)
+	go s.runBalanceLoop(ctx)
+	go s.runCheckinRetryLoop(ctx)
+	var (
+		hours     []int
+		next      time.Time
+		replanned bool // 刚被 wake 叫醒：排完新时点打一行日志，便于确认热改真的生效
+	)
 	for {
+		wake := s.wakeup()
+		if hours == nil {
+			hours = s.allHours()
+		}
+		if len(hours) == 0 {
+			// 两个任务都关了：没有时点要等，躺到退出或排程被改成有任务为止。
+			select {
+			case <-ctx.Done():
+				return
+			case <-wake:
+				hours = nil
+				replanned = true
+			}
+			continue
+		}
+		if next.IsZero() {
+			next = nextFire(time.Now(), hours)
+			if replanned {
+				s.mu.RLock()
+				ci, ch := s.cfg.CheckinEnabled, append([]int(nil), s.cfg.CheckinHours...)
+				ka, kh := s.cfg.KeepaliveEnabled, append([]int(nil), s.cfg.KeepaliveHours...)
+				s.mu.RUnlock()
+				// 分开报两个任务：hours 是两者合并后的集合，混在一起看不出哪个任务在几点。
+				log.Printf("[schedule] 排程已热更新：签到=%v 时点%v，保活=%v 时点%v，下次触发 %s",
+					ci, ch, ka, kh, next.Format("2006-01-02 15:04"))
+				replanned = false
+			}
+		}
 		timer := time.NewTimer(time.Until(next))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
+		case <-wake:
+			// 排程改了：时点集合与开关都可能变，重算（保留「从计划时点推进」的语义
+			// 不适用这里——旧计划已作废，按当下重新排）。
+			timer.Stop()
+			hours = nil
+			next = time.Time{}
+			replanned = true
 		case <-timer.C:
 			fired := next
 			next = nextFire(fired, hours)
@@ -236,26 +293,56 @@ var checkinRetryInterval = time.Hour
 // 「进程起来先扫一遍」不在这里做：`catchUpCheckin` 已经负责启动补跑，重复调用会对上游连打两次。
 // ponytail: 固定 1 小时。要更密/更疏就把它做成配置项。
 func (s *Scheduler) runCheckinRetryLoop(ctx context.Context) {
-	t := time.NewTicker(checkinRetryInterval)
-	defer t.Stop()
+	// 签到这个任务被关掉时也留在这条循环里等（wake 会把它叫醒）：否则面板打开签到后
+	// 补签扫描要等到重启才出现。
 	for {
+		wake := s.wakeup()
+		s.mu.RLock()
+		on := s.cfg.CheckinEnabled
+		s.mu.RUnlock()
+		if !on {
+			select {
+			case <-ctx.Done():
+				return
+			case <-wake:
+			}
+			continue
+		}
+		t := time.NewTimer(checkinRetryInterval)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
+		case <-wake:
+			t.Stop()
 		case <-t.C:
 			s.RunCheckinNow()
 		}
 	}
 }
 
-// runBalanceLoop 周期刷新余额；interval 由配置决定（<=0 时调用方不启动）。
-func (s *Scheduler) runBalanceLoop(ctx context.Context, interval time.Duration) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
+// runBalanceLoop 周期刷新余额；周期是热项，每轮重读（<=0 = 暂停，等 wake 叫醒）。
+func (s *Scheduler) runBalanceLoop(ctx context.Context) {
 	for {
+		wake := s.wakeup()
+		s.mu.RLock()
+		interval := s.cfg.BalanceRefreshInterval
+		s.mu.RUnlock()
+		if interval <= 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-wake:
+			}
+			continue
+		}
+		t := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
+		case <-wake:
+			t.Stop()
 		case <-t.C:
 			s.RunBalanceRefresh()
 		}

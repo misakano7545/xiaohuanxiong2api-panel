@@ -239,7 +239,8 @@ func main() {
 			}
 			*cfg = *next
 			// 热生效：池参数、运行期设置、出站身份/超时、会话粘性开关。
-			// 排程（时点/开关/余额周期）不走这里，如实报"需重启"（RestartFields）。
+			// 排程（时点/开关/余额周期）走 ApplySchedule：唤醒调度循环重算，不用重启。
+			// 只剩 listen/auth_dir/state_file、会话 GC 周期、请求归档需要重启（RestartFields）。
 			p.ApplyLimits(limitsOf(next))
 			h.ApplyRuntime(server.Runtime{
 				DefaultModel: next.DefaultModel,
@@ -247,6 +248,9 @@ func main() {
 				PromptText:   next.PromptText,
 				APIKey:       next.APIKey,
 			})
+			sch.ApplySchedule(next.Schedule.CheckinEnabled, next.Schedule.CheckinHours,
+				next.Schedule.KeepaliveEnabled, next.Schedule.KeepaliveHours,
+				next.BalanceRefreshInt)
 			pn.ApplyAPIKey(next.APIKey) // 面板自己也认新密钥，否则保存完就把自己挡在门外
 			applyUpstream(up, next)
 			sess.Apply(session.Config{Enabled: next.SessionSticky.Enabled, TTL: next.SessionTTL})
