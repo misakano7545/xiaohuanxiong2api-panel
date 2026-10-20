@@ -281,6 +281,12 @@ func (h *Handler) Models() []map[string]any {
 			"credits":                 mi.Credits,
 			"thinking":                map[bool]string{true: "enabled", false: "disabled"}[mi.Reasoning],
 		}
+		// 限免：让面板能直接标出来（credit_rate 已经是 0，这里补文案/原倍率）。
+		if mi.BillingStatus != "" {
+			entry["billing_status"] = mi.BillingStatus
+			entry["free_note"] = mi.FreeNote
+			entry["base_credits"] = mi.BaseCredits
+		}
 		if mi.Reasoning {
 			entry["capability"] = "reasoning_model"
 		}

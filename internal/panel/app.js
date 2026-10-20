@@ -427,6 +427,8 @@ function mdSortList(list, f) {
 // 否则搜「视觉」搜不到——那一列已经不显示上游枚举了。
 function mdCaps(m) {
   const out = [];
+  // 限免排最前：它是「现在白用」的强信号，比推理/视觉更值得先看到。
+  if (m.billing_status === 'limited_free') out.push(['free', '限免', m.free_note || '限时免费']);
   if (m.capability === 'reasoning_model') out.push(['ok', '推理']);
   if (m.supports_image) out.push(['warn', '视觉']);
   if (m.max) out.push(['mute', 'Max 上下文']);
@@ -447,7 +449,11 @@ function mdRowHtml(m) {
     '<td>' + thinkCell(m) + '</td>' +
     '<td>' + tag('mute', fnLabel(m.function)) + '</td>' +
     // 倍率：上游基准积分倍率（客户端选择器同源）。没有就是上游没给，显示 — 而不是编一个数。
-    '<td class="num">' + (m.credit_rate ? '<b>' + m.credit_rate.toFixed(2) + '×</b>' : '—') + '</td>' +
+    // 0 是「限免」的合法值，不能用真值判断（否则限免行会掉成 —）。
+    '<td class="num">' + (m.credit_rate != null
+      ? '<b>' + m.credit_rate.toFixed(2) + '×</b>' +
+        (m.credit_rate === 0 && m.base_credits ? ' <s style="opacity:.45">' + esc(m.base_credits) + '</s>' : '')
+      : '—') + '</td>' +
     '<td class="num"' + (m.context_length_max ? ' title="声明口径 max ' + fmtNum(m.context_length_max) + '（本列显示的是 __dev 实际请求口径）"' : '') + '>' +
       (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
     '<td class="num">' + (m.max_output_tokens ? Math.round(m.max_output_tokens / 1000) + 'K' : '—') + '</td></tr>';

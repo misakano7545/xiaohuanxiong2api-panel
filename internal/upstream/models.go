@@ -27,6 +27,12 @@ type ModelInfo struct {
 	Efforts       []string `json:"efforts,omitempty"`
 	VL            bool     `json:"vision"`
 	Credits       string   `json:"credits,omitempty"`
+	// 限免透传：上游用 billing_status=limited_free + billing_effective_multiplier=0 标记
+	// 「限时免费」（当前：SenseNova 两枚限免至 10-31，DeepSeek-1017 限免 10-20 起至 10-31）。
+	// Credits 在限免时改写为 x0（消费口径），原倍率留在 BaseCredits 供面板划掉显示。
+	BillingStatus string `json:"billing_status,omitempty"`
+	FreeNote      string `json:"free_note,omitempty"`
+	BaseCredits   string `json:"base_credits,omitempty"`
 	Source        string   `json:"function,omitempty"`
 	UpstreamKey   string   `json:"upstream_key,omitempty"`
 	Visible       bool     `json:"visible"`
@@ -175,6 +181,23 @@ func normalizeEntry(entry map[string]any) (ModelInfo, bool) {
 			credits = "x" + strings.TrimSuffix(strings.TrimSuffix(fmt.Sprintf("%.2f", f), "0"), ".")
 		}
 	}
+	// 限免：上游 billing_status=limited_free（effective 倍率 0）。面板要能直接看出「这个模型
+	// 现在不扣积分」，所以 Credits 改写成 x0（真实消费口径），原倍率存 BaseCredits 让页面划掉。
+	// 只认 effective==0 或 status==limited_free，普通折扣（如 glm-5-3 eff 0.75）不当限免。
+	billingStatus := text(entry, "billing_status")
+	freeNote := text(entry, "billing_status_note")
+	baseCredits := ""
+	if eff, hasEff := floatOf(entry["billing_effective_multiplier"]); billingStatus == "limited_free" || (hasEff && eff == 0) {
+		if billingStatus == "limited_free" || credits != "" {
+			baseCredits = credits
+			credits = "x0"
+			if freeNote == "" {
+				freeNote = discountNote(entry, "限时免费")
+			}
+		}
+	} else {
+		billingStatus = ""
+	}
 	return ModelInfo{
 		ID:            id,
 		Name:          name,
@@ -185,10 +208,31 @@ func normalizeEntry(entry map[string]any) (ModelInfo, bool) {
 		Efforts:       []string{"low", "medium", "high"},
 		VL:            tagMatch(tags, "vision", "image", "vl"),
 		Credits:       credits,
+		BillingStatus: billingStatus,
+		FreeNote:      freeNote,
+		BaseCredits:   baseCredits,
 		Source:        "raccoon",
 		UpstreamKey:   id,
 		Visible:       visible,
 	}, true
+}
+
+// discountNote 限免文案兜底：billing_status_note 为空时取 billing_discounts 里名字最像的一条。
+func discountNote(entry map[string]any, fallback string) string {
+	discounts, _ := entry["billing_discounts"].([]any)
+	for _, raw := range discounts {
+		d, _ := raw.(map[string]any)
+		if d == nil {
+			continue
+		}
+		if active, ok := d["active"].(bool); ok && !active {
+			continue
+		}
+		if name := text(d, "name", "note", "title"); name != "" {
+			return name
+		}
+	}
+	return fallback
 }
 
 func tagMatch(tags []string, wanted ...string) bool {
