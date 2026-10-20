@@ -37,9 +37,12 @@ type Config struct {
 	Version   string
 	// BindAll listen 绑了所有网卡（空密钥时面板对全网开放，不只是本机）——app.js 的提示要分开说。
 	BindAll bool
-	Logs    *Ring
-	Models  func() []map[string]any
-	Usage   *usage.Recorder // 可选，用量台账
+	// CallbackBase 环回授权回调的基址（http://127.0.0.1:<端口>）。空 = 不支持浏览器授权，
+	// 面板只能走「导入账号」粘贴。官方授权页只认 127.0.0.1 的环回地址，所以这里不能用 LAN IP。
+	CallbackBase string
+	Logs         *Ring
+	Models       func() []map[string]any
+	Usage        *usage.Recorder // 可选，用量台账
 	// RequestLog 可选，请求级指标/归档（运行日志页的「请求记录」）。nil = 该接口 501。
 	RequestLog *reqlog.Recorder
 	ConfigPath string
@@ -88,9 +91,10 @@ func New(cfg Config) *Panel {
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
+	// 环回授权回调不带 Bearer：它是浏览器跳转过来的，不是面板前端发的请求（见 authCallback）。
+	p.mux.HandleFunc("GET /auth/callback", p.authCallback)
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
-	// refreshToken 直登：不经过浏览器把号加进来（授权页只认浏览器本机的 127.0.0.1 回调，
-	// 公网回跳实测被拒，见 login.go 顶部——所以这条路是唯一的免粘贴方案）。
+	// refreshToken 直登：不经过浏览器把号加进来（对方只给了一条 refresh_token 时的备用入口）。
 	p.mux.HandleFunc("POST /panel/api/login/refresh", p.withAuth(p.loginRefresh))
 	p.mux.HandleFunc("POST /panel/api/checkin", p.withAuth(p.checkinAll))
 	p.mux.HandleFunc("POST /panel/api/balance", p.withAuth(p.balanceAll))

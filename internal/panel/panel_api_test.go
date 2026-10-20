@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +64,8 @@ func newTestPanel(t *testing.T) (*Panel, *upstream.Client, *pool.Pool) {
 	h := &apiShim{up: up}
 	pn := New(Config{
 		Pool: p, Upstream: up, AuthDir: t.TempDir(), Version: "test",
-		Models: h.models, Usage: nil,
+		CallbackBase: "http://127.0.0.1:17867", // 环回授权回调（只用来拼 URL，测试不起真监听）
+		Models:       h.models, Usage: nil,
 	})
 	return pn, up, p
 }
@@ -166,12 +169,67 @@ func TestImportPAT(t *testing.T) {
 	}
 }
 
-// 小浣熊没有设备码授权：login/start 如实报错，用户改走「导入账号」。
-func TestDeviceLoginUnsupported(t *testing.T) {
-	pn, _, _ := newTestPanel(t)
+// 浏览器授权（环回回调）全链路：start 给出带 loopback 参数的授权页 → 浏览器把 code 打到
+// /auth/callback → poll 换票入池。这条链路替代了原来「粘贴 office-raccoon:// 链接」的人工步骤。
+func TestLoopbackLoginFlow(t *testing.T) {
+	pn, _, p := newTestPanel(t)
 	code, body := call(t, pn, http.MethodPost, "/panel/api/login/start", `{"realm":"cn"}`)
-	if code != http.StatusBadGateway {
-		t.Fatalf("status = %d", code)
+	if code != http.StatusOK {
+		t.Fatalf("login/start status = %d body = %v", code, body)
+	}
+	state := fmt.Sprint(body["id"])
+	if !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(state) {
+		t.Fatalf("state 应为 64 位小写 hex，得到 %q", state)
+	}
+	page := fmt.Sprint(body["url"])
+	for _, want := range []string{
+		"/code/authorize", "login_source=desktop", "desktop_callback=loopback",
+		"state=" + state, "redirect=" + url.QueryEscape("http://127.0.0.1:17867/auth/callback"),
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("授权页 URL 缺 %q: %s", want, page)
+		}
+	}
+
+	// 还没回调：poll 说没完成。
+	code, body = call(t, pn, http.MethodGet, "/panel/api/login/poll?id="+state, "")
+	if code != http.StatusOK || body["done"] != false {
+		t.Fatalf("未回调时 poll = %d %v", code, body)
+	}
+
+	// 浏览器带着错误 state 回来：必须拒绝（否则任何人都能往池子里塞号）。
+	if code, _ := call(t, pn, http.MethodGet, "/auth/callback?state="+strings.Repeat("0", 64)+"&code=abc", ""); code != http.StatusGone {
+		t.Errorf("陌生 state 应 410，得到 %d", code)
+	}
+
+	// 正常回调：code 交给会话，页面回成功。
+	if code, _ := call(t, pn, http.MethodGet, "/auth/callback?state="+state+"&code=ac_test", ""); code != http.StatusOK {
+		t.Fatalf("回调页 status = %d", code)
+	}
+	// 同一个 state 只能收一次 code（防重放）。
+	if code, _ := call(t, pn, http.MethodGet, "/auth/callback?state="+state+"&code=ac_test2", ""); code != http.StatusBadRequest {
+		t.Errorf("重复回调应 400，得到 %d", code)
+	}
+
+	code, body = call(t, pn, http.MethodGet, "/panel/api/login/poll?id="+state, "")
+	if code != http.StatusOK || body["done"] != true {
+		t.Fatalf("回调后 poll = %d %v", code, body)
+	}
+	if body["uid"] != "u-9" {
+		t.Errorf("uid = %v（授权码换票应返回 u-9）", body["uid"])
+	}
+	if _, ok := p.Status("u-9"); !ok {
+		t.Errorf("授权完成后账号应进池")
+	}
+}
+
+// 面板监听端口不在环回可用范围时，login/start 如实报错并指向「导入账号」。
+func TestLoopbackUnsupported(t *testing.T) {
+	pn, _, _ := newTestPanel(t)
+	pn.cfg.CallbackBase = "" // 例如 listen 端口 <1024 或拿不到端口
+	code, body := call(t, pn, http.MethodPost, "/panel/api/login/start", `{"realm":"cn"}`)
+	if code != http.StatusNotImplemented {
+		t.Fatalf("status = %d body = %v", code, body)
 	}
 	if !strings.Contains(fmt.Sprint(body["error"]), "导入账号") {
 		t.Errorf("错误文案应指向导入账号: %v", body["error"])

@@ -1629,7 +1629,7 @@ async function loadPackages() {
   }
 }
 
-/* ── 添加账号（不轮询：贴回调地址换票）────────────────────────────── */
+/* ── 添加账号（浏览器授权：官方页把 code 打到面板 /auth/callback，轮询收号）───── */
 // 地区：链接按地区切域（国内 www.trae.cn / 国际 www.trae.ai）。回调自带 OAuth host，
 // 所以换票那步不用再选一次——面板按 host 自动落 domain/apiHost。
 let addRealm = 'cn'; // 与弹窗里默认勾选的单选一致

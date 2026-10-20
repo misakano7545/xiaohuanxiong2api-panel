@@ -350,6 +350,23 @@ func bindsAllInterfaces(addr string) bool {
 	return host == "" || host == "0.0.0.0" || host == "::"
 }
 
+// loopbackCallbackBase 由 listen 推出环回回调基址（http://127.0.0.1:<port>）。
+//
+// 官方授权页只认 127.0.0.1 的环回回调（正则硬编码），所以即便面板绑在 0.0.0.0 或 LAN IP，
+// 这里也必须给 127.0.0.1——浏览器得和面板在同一台机器上跑才走得通，其余情况用「导入账号」。
+// 端口取不到（listen 写成 :8080 之类）或不在 1024-65535 时返回空串 = 不支持浏览器授权。
+func loopbackCallbackBase(addr string) string {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1024 || n > 65535 {
+		return ""
+	}
+	return "http://127.0.0.1:" + port
+}
+
 // normalize 补齐缺省、解析时长、校验范围。非法值一律 fail fast（启动/保存即报错），
 // 只有"未设置"才回落默认，避免静默改变行为。
 func (c *Config) normalize() error {

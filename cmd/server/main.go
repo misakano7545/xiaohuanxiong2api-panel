@@ -205,18 +205,20 @@ func main() {
 	})
 	var pn *panel.Panel // 先声明：SaveConfig 闭包里要调 pn.ApplyAPIKey，赋值在这之后
 	pn = panel.New(panel.Config{
-		Pool:       p,
-		Upstream:   up,
-		Scheduler:  sch,
-		AuthDir:    cfg.AuthDir,
-		APIKey:     cfg.APIKey,
-		BindAll:    bindsAllInterfaces(cfg.Listen),
-		Version:    appVersion,
-		Logs:       logs,
-		Models:     h.Models,
-		Usage:      rec,
-		RequestLog: rlog,
-		ConfigPath: *cfgPath,
+		Pool:      p,
+		Upstream:  up,
+		Scheduler: sch,
+		AuthDir:   cfg.AuthDir,
+		APIKey:    cfg.APIKey,
+		BindAll:   bindsAllInterfaces(cfg.Listen),
+		// 浏览器授权的环回回调基址（官方页只认 127.0.0.1）；空 = 该机器只能粘贴导入。
+		CallbackBase: loopbackCallbackBase(cfg.Listen),
+		Version:      appVersion,
+		Logs:         logs,
+		Models:       h.Models,
+		Usage:        rec,
+		RequestLog:   rlog,
+		ConfigPath:   *cfgPath,
 		LoadConfig: func() (any, error) {
 			cfgMu.Lock()
 			defer cfgMu.Unlock()

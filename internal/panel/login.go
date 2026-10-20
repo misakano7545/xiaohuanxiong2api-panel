@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -57,6 +58,51 @@ func newMachineID() string {
 	}, "-")
 }
 
+// authCallback 接官方授权页的回调（无需 API key：这是浏览器跳转，不是面板前端调用）。
+//
+// 只做两件事：核对 state 属于哪个未完成的登录会话、把 code 交给它。换票在 login/poll 里做，
+// 这样浏览器那边一提交就能立刻回一个干净的成功页，网络慢也不拖住页面。
+//
+// 安全边界：state 是 32 字节随机数，只存在内存里、5~15 分钟内一次性有效；code 本身也是
+// 一次性授权码（上游 300 秒过期）。就算有人扫到这个端点，没有 state 也塞不进账号。
+func (p *Panel) authCallback(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	state, code := query.Get("state"), query.Get("code")
+	// 官方页在用户取消/失败时也可能带 error 回来。
+	if msg := query.Get("error"); msg != "" {
+		writeCallbackPage(w, http.StatusBadRequest, "授权未完成", msg)
+		return
+	}
+	if state == "" || code == "" {
+		writeCallbackPage(w, http.StatusBadRequest, "回调参数不全", "缺少 state 或 code")
+		return
+	}
+	p.loginMu.Lock()
+	sess, ok := p.logins[state]
+	p.loginMu.Unlock()
+	if !ok || time.Since(sess.At) > loginTTL {
+		writeCallbackPage(w, http.StatusGone, "登录会话已失效", "请回到面板重新点「添加账号」")
+		return
+	}
+	if err := sess.Login.AcceptCallback(state, code); err != nil {
+		writeCallbackPage(w, http.StatusBadRequest, "无法接收授权", err.Error())
+		return
+	}
+	log.Printf("panel: 收到浏览器授权回调 state=%.8s…", state)
+	writeCallbackPage(w, http.StatusOK, "授权成功", "可以关闭这个页面，回到面板即可（账号会自动出现）")
+}
+
+// writeCallbackPage 给浏览器看的极简结果页：不引外部资源、不回显 code。
+func writeCallbackPage(w http.ResponseWriter, status int, title, detail string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, `<!doctype html><meta charset="utf-8"><title>`+html.EscapeString(title)+
+		`</title><body style="font:15px/1.6 system-ui,Segoe UI,Microsoft YaHei,sans-serif;padding:56px;color:#222">`+
+		`<h2 style="margin:0 0 8px">`+html.EscapeString(title)+`</h2><p style="color:#555;margin:0">`+
+		html.EscapeString(detail)+`</p></body>`)
+}
+
 // loginStart 生成设备授权链接：{id, url}。用户在自己浏览器里打开 url 完成授权。
 func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -68,9 +114,11 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 		realm = upstream.RegionCN
 	}
 	machine := newMachineID()
-	login, err := upstream.NewDeviceLogin(p.cfg.Upstream, realm, machine)
+	// 环回回调：浏览器登录完由官方授权页把 code 打到面板自己的 /auth/callback，
+	// 全程不需要官方客户端、也不需要人工粘贴 code。
+	login, err := upstream.NewDeviceLogin(p.cfg.Upstream, realm, machine, p.cfg.CallbackBase)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, err.Error())
+		writeErr(w, http.StatusNotImplemented, err.Error())
 		return
 	}
 	p.loginMu.Lock()

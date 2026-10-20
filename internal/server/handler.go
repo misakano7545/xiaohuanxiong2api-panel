@@ -103,6 +103,9 @@ func NewHandler(cfg Config) *Handler {
 
 func mountPanel(mux *http.ServeMux, p http.Handler) {
 	mux.Handle("/panel/", p)
+	// 环回授权回调在 /auth/callback（不在 /panel/ 下）：官方授权页只认
+	// http://127.0.0.1:<port>/auth/callback 这个确切路径，所以必须挂在站点根上。
+	mux.Handle("/auth/callback", p)
 	mux.HandleFunc("/panel", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/panel/", http.StatusPermanentRedirect)
 	})

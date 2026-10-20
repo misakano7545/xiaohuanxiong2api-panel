@@ -7,11 +7,16 @@ package upstream
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
@@ -356,37 +361,124 @@ func (c *Client) exchangeCode(code string) (*auth.Auth, error) {
 	return account, nil
 }
 
-// DeviceLogin 是小浣熊没有的设备码流程：面板「添加账号」点它会拿到这条提示，
-// 让人改用「导入账号」粘贴 access_token 或授权回调链接。
+// DeviceLogin 是浏览器授权会话（不需要官方客户端，也不需要人工粘贴）。
+//
+// 官方网页授权页（抓包 [51] 起）本来就支持给「非官方桌面客户端」投递授权码：
+//
+//	/code/authorize?login_source=desktop&appname=…&state=<64 hex>
+//	                &redirect=http://127.0.0.1:<port>/auth/callback
+//	                &desktop_callback=loopback
+//
+// 页面（抓包 [68] 的 authorize chunk）校验：redirect 必须匹配
+// ^http://127\.0\.0\.1:[1-9][0-9]{3,4}/auth/callback$、state 必须 64 位小写 hex、
+// 且必须带 desktop_callback=loopback，否则退回默认的 office-raccoon:// 跳转。
+// 同一处还认 vscode://sensetime.raccoon——这条通道是给 IDE/第三方客户端用的公开扩展点，
+// 我们复用它，而不是去逆向客户端二进制。
+//
+// 于是流程是：面板给出授权页 URL → 用户在自己浏览器登录（图形验证码由页面自己做）
+// → 页面把 code 打到我们自己的 /auth/callback → 面板 exchangeCode 换票入池。
 type DeviceLogin struct {
-	url   string
-	realm string
+	client  *Client
+	realm   string
+	machine string
+	state   string
+	url     string
+
+	mu   sync.Mutex
+	code string // 回调已经送到的授权码（单次使用）
 }
 
-// ErrDeviceLoginUnsupported 说明小浣熊不走设备码授权。
-var ErrDeviceLoginUnsupported = errors.New(
-	"小浣熊没有设备码授权：请在浏览器登录 xiaohuanxiong.com 后，把授权回调链接（office-raccoon://auth/callback?code=…）或账号 JSON 粘贴到「导入账号」里")
+// ErrLoopbackUnsupported 说明当前监听端口不能用于环回回调。
+var ErrLoopbackUnsupported = errors.New(
+	"环回回调要求面板监听在 127.0.0.1 的 1024-65535 端口；请改用「导入账号」粘贴授权回调链接或账号 JSON")
 
-// NewDeviceLogin 固定返回不支持（保留基线调用点：面板 login.go 原样复用）。
-func NewDeviceLogin(client *Client, realm, _ string) (*DeviceLogin, error) {
+// NewDeviceLogin 建一次浏览器授权会话，callbackBase 形如 http://127.0.0.1:17867。
+func NewDeviceLogin(client *Client, realm, machine, callbackBase string) (*DeviceLogin, error) {
 	if client == nil {
-		return nil, ErrDeviceLoginUnsupported
+		return nil, ErrLoopbackUnsupported
 	}
-	return &DeviceLogin{url: client.originBase() + "/code/authorize?login_source=desktop", realm: realm}, ErrDeviceLoginUnsupported
+	state, err := randState()
+	if err != nil {
+		return nil, err
+	}
+	callback := strings.TrimRight(callbackBase, "/") + "/auth/callback"
+	// 与网页端同一条正则：只认 127.0.0.1 + 1024~65535 端口。写在前端能挡住的就不让上游拒。
+	if !loopbackCallbackPattern.MatchString(callback) {
+		return nil, ErrLoopbackUnsupported
+	}
+	query := url.Values{}
+	query.Set("login_source", "desktop")
+	query.Set("appname", "办公小浣熊客户端")
+	query.Set("state", state)
+	query.Set("redirect", callback)
+	query.Set("desktop_callback", "loopback")
+	return &DeviceLogin{
+		client:  client,
+		realm:   realm,
+		machine: machine,
+		state:   state,
+		url:     client.originBase() + "/code/authorize?" + query.Encode(),
+	}, nil
 }
 
-// State 返回会话标识（基线面板拿它当 id）。
-func (d *DeviceLogin) State() string { return "raccoon-manual" }
+// loopbackCallbackPattern 抄自官方 authorize 页：端口必须 1024-65535（四位以上且不以 0 开头）。
+var loopbackCallbackPattern = regexp.MustCompile(`^http://127\.0\.0\.1:[1-9][0-9]{3,4}/auth/callback$`)
+
+// randState 生成 32 字节随机数的 hex（64 位小写），与网页端 state 校验同形。
+func randState() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// State 既是面板轮询用的会话 id，也是回调要核对的 state。
+func (d *DeviceLogin) State() string { return d.state }
 
 // Realm 返回地区。
 func (d *DeviceLogin) Realm() string { return d.realm }
 
-// AuthURL 返回授权页地址，供人工打开。
+// AuthURL 返回授权页地址，面板展示 + 一键打开。
 func (d *DeviceLogin) AuthURL() string { return d.url }
 
-// Poll 不轮询：小浣熊靠回调链接人工粘贴。
+// AcceptCallback 收下浏览器送回的授权码（state 必须与本会话一致，且只收一次）。
+func (d *DeviceLogin) AcceptCallback(state, code string) error {
+	if subtle.ConstantTimeCompare([]byte(state), []byte(d.state)) != 1 {
+		return errors.New("state 不匹配：这条回调不属于当前登录会话")
+	}
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return errors.New("回调里没有 code")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.code != "" {
+		return errors.New("这个登录会话已经用过了，请回面板重新添加")
+	}
+	d.code = code
+	return nil
+}
+
+// Poll 还没收到回调 → (nil,false,nil)；收到了 → 换票并返回凭证（授权码一次性，取走即清）。
 func (d *DeviceLogin) Poll(context.Context) (*auth.Auth, bool, error) {
-	return nil, false, ErrDeviceLoginUnsupported
+	d.mu.Lock()
+	code := d.code
+	d.code = ""
+	d.mu.Unlock()
+	if code == "" {
+		return nil, false, nil
+	}
+	creds, err := d.client.exchangeCode(code)
+	if err != nil {
+		return nil, false, err
+	}
+	if creds != nil && d.machine != "" {
+		if err := creds.CompleteIdentity(d.machine); err != nil {
+			return nil, false, err
+		}
+	}
+	return creds, true, nil
 }
 
 // ParseCallbackCode 从 office-raccoon://auth/callback?code=..&state=.. 取 code/state。
