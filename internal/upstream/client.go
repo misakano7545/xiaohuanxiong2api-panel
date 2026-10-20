@@ -38,7 +38,9 @@ const (
 	DesktopBase      = Origin + "/api/web/desktop/v1"
 	PointsGrantPath  = "/login/points/grant"
 	PointsBillsPath  = "/bills"
-	PointsBillsQuery = "paging.limit=10&type=all&paging.offset=0"
+	// limit 必须给足：流水按时间倒序，重度使用一天几十条 -N 消费记录会把
+	// 今日 +300 的 daily_grant 挤出前 10 条，签到状态就会误判 false。
+	PointsBillsQuery = "paging.limit=100&type=all&paging.offset=0"
 
 	// RegionGlobal / RegionCN 保留基线的地区常量：小浣熊只有一个站，
 	// 名字留着是为了不让 pool/panel/server 的既有分支全部改口。
