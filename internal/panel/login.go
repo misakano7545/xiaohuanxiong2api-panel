@@ -109,10 +109,10 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 		Realm string `json:"realm"`
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req)
-	realm := upstream.RegionGlobal
-	if strings.EqualFold(strings.TrimSpace(req.Realm), upstream.RegionCN) {
-		realm = upstream.RegionCN
-	}
+	// 小浣熊目前只有国内版（RegionGlobal 也 == "cn"）。国际版分支先留着：
+	// 等官方出国际站/国际客户端，把这里改回「按 req.Realm 分流」即可。
+	_ = req.Realm
+	realm := upstream.RegionCN
 	machine := newMachineID()
 	// 环回回调：浏览器登录完由官方授权页把 code 打到面板自己的 /auth/callback，
 	// 全程不需要官方客户端、也不需要人工粘贴 code。

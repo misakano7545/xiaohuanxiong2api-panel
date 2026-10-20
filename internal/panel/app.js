@@ -475,7 +475,9 @@ function renderModels() {
 }
 function resetModelFilter() {
   mdFilter = { q: '', realm: '', fn: '', sort: 'default' };
-  $('mdQ').value = ''; $('mdRealm').value = ''; $('mdFn').value = ''; $('mdSort').value = 'default';
+  $('mdQ').value = ''; $('mdFn').value = ''; $('mdSort').value = 'default';
+  // mdRealm 下拉随「地区」一起注释掉了：只有一个域，无从筛。有元素才重置（保留恢复能力）。
+  if ($('mdRealm')) $('mdRealm').value = '';
   renderModels();
 }
 async function loadModels() {
@@ -1632,7 +1634,9 @@ async function loadPackages() {
 /* ── 添加账号（浏览器授权：官方页把 code 打到面板 /auth/callback，轮询收号）───── */
 // 地区：链接按地区切域（国内 www.trae.cn / 国际 www.trae.ai）。回调自带 OAuth host，
 // 所以换票那步不用再选一次——面板按 host 自动落 domain/apiHost。
-let addRealm = 'cn'; // 与弹窗里默认勾选的单选一致
+// 小浣熊目前只有国内版：地区单选已在 index.html 注释掉，这里固定 cn。
+// 官方出国际版客户端后，把弹窗里的 .realm-row 放开、恢复下面那行 onchange 即可。
+let addRealm = 'cn';
 let addTab = 'browser';
 
 // switchAddTab 主按钮跟着 tab 走：一屏只有一个「加入」，避免两个并列主 CTA 抢焦点。
@@ -1766,7 +1770,8 @@ function boot() {
   document.querySelectorAll('#addTabs .tab').forEach(b => {
     b.onclick = () => { addTab = b.dataset.tab; switchAddTab(addTab); };
   });
-  // 换地区就换一条链接，免得拿国内链接登国际号
+  // 换地区就换一条链接，免得拿国内链接登国际号。
+  // 地区单选当前被注释（只有国内版），这条绑定拿到的是空集合，保持不动以便恢复。
   document.querySelectorAll('#addVeil input[name="addRealm"]').forEach(r => {
     r.onchange = () => { addRealm = r.value; openAdd(); };
   });

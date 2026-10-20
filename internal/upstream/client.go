@@ -42,8 +42,10 @@ const (
 	// 今日 +300 的 daily_grant 挤出前 10 条，签到状态就会误判 false。
 	PointsBillsQuery = "paging.limit=100&type=all&paging.offset=0"
 
-	// RegionGlobal / RegionCN 保留基线的地区常量：小浣熊只有一个站，
-	// 名字留着是为了不让 pool/panel/server 的既有分支全部改口。
+	// RegionGlobal / RegionCN 保留基线的地区常量：小浣熊只有一个站
+	// （xiaohuanxiong.com），面板上的「地区」选择已注释掉（index.html 的 .realm-row），
+	// login/start 固定按 RegionCN 建会话。等官方出国际版客户端再放开那块 UI，
+	// pool 的分区选号/美元额度逻辑一直在（休眠状态），不需要重写。
 	RegionGlobal = "cn"
 	RegionCN     = "cn"
 

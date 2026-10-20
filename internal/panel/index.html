@@ -680,8 +680,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="stat bad"><div class="v" id="sDisabled">-</div><div class="k">已禁用</div></div>
         <div class="stat"><div class="v" id="sCredits">-</div><div class="k">积分合计</div></div>
         <!-- 国际版不是「无限免费」：Free plan 走美元计量（实测 basic_usage_limit=1 即 $1 额度）。
-             单列一张卡，不把美元并进「积分合计」——两种单位不可换算。无美元账号时整卡隐藏。 -->
+             单列一张卡，不把美元并进「积分合计」——两种单位不可换算。无美元账号时整卡隐藏。
+             小浣熊暂无国际版，此卡先注释；出现国际账号时取消注释即可（app.js 已做 null 保护）。
         <div class="stat" id="sCreditsUsdBox" hidden><div class="v" id="sCreditsUsd">-</div><div class="k">国际额度（美元）</div></div>
+        -->
         <div class="stat warn"><div class="v" id="sCheckin">-</div><div class="k">签到冷却</div></div>
         <!-- 排程现状：下次签到/保活几点（时点在服务端配置里，改排程要重启）。 -->
         <div class="stat" title="排程现状（面板只读）"><div class="v" id="sSchedule">-</div><div class="k">下次签到</div></div>
@@ -723,10 +725,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </header>
         <div class="fbar" id="mdFilter">
           <input id="mdQ" type="search" placeholder="搜索模型 ID / 展示名 / 能力" aria-label="搜索模型">
+          <!-- 按域筛选同样注释：只有一个域，留着是噪音（app.js 里 mdFilter.realm 逻辑保留）。
           <select id="mdRealm" aria-label="按域筛选">
             <option value="">全部域</option>
             <option value="cn">国内版 CN</option>
           </select>
+          -->
           <select id="mdFn" aria-label="按通道筛选">
             <option value="">全部通道</option>
             <option value="raccoon">Raccoon</option>
@@ -1116,11 +1120,15 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
     </header>
     <div class="body">
+      <!-- 地区选择先注释：小浣熊目前只有国内版（xiaohuanxiong.com），没有国际站/国际客户端。
+           等官方出国际版客户端再放开这块；后端 realm 分支（upstream.RegionGlobal、pool 的
+           realm 字段、美元额度卡）都保留着，取消注释即可恢复。
       <div class="realm-row">
         <span class="lb" style="font-size:12.5px;color:var(--ink-2)">地区</span>
         <label class="realm-opt"><input type="radio" name="addRealm" value="cn" checked>国内版</label>
         <label class="realm-opt"><input type="radio" name="addRealm" value="intl">国际版</label>
       </div>
+      -->
       <div id="addTabBrowser" class="tab-panel">
         <div id="addLoad" class="state"><span class="dots">正在获取授权链接</span></div>
         <div id="addReady" hidden>
@@ -1136,7 +1144,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div id="addTabToken" class="tab-panel" hidden>
         <label class="fld"><span class="lb">refreshToken</span>
           <input id="addRefreshToken" spellcheck="false" autocomplete="off" placeholder="从别处拿到的 refreshToken">
-          <span class="hint">直接把 refreshToken（或 pt- 开头的 PAT）换成凭证落盘。地区按上面的选择。</span>
+          <span class="hint">直接把 refreshToken（或 pt- 开头的 PAT）换成凭证落盘。</span>
         </label>
       </div>
       <div id="addErr" class="state err" hidden></div>
