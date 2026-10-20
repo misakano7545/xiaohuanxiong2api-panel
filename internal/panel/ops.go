@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/misakano7545/qoder2api-panel/internal/auth"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
 )
 
 // maskSecret 只回前缀 + 长度，绝不回完整 token（与 overview 同口径）。
@@ -131,10 +131,13 @@ func (p *Panel) accountImport(w http.ResponseWriter, r *http.Request) {
 		}
 	case strings.HasPrefix(lower, "pt-"):
 		payload["pat"] = trim
-	case strings.HasPrefix(lower, "drt-"), strings.HasPrefix(lower, "jrt-"):
-		payload["refreshToken"] = trim
+	case strings.HasPrefix(lower, "office-raccoon://"):
+		payload["callback"] = trim
+	case strings.HasPrefix(trim, "eyJ"):
+		payload["access_token"] = trim
 	default:
-		writeErr(w, http.StatusBadRequest, "无法识别的内容：请粘贴 Qoder 账号 JSON，或 pt- 开头的 PAT")
+		writeErr(w, http.StatusBadRequest,
+			"无法识别的内容：请粘贴小浣熊账号 JSON（access_token / refresh_token），或 office-raccoon:// 授权回调链接")
 		return
 	}
 	creds, err := p.cfg.Upstream.PrepareAccount(r.Context(), payload, newMachineID())

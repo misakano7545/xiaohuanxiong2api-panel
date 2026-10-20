@@ -2,9 +2,9 @@
 //
 // 上游 token_usage 帧里只有 token 数，没有积分字段；面板那列一律带「≈」。
 //
-// Qoder 的积分单价没有可引用的公开表（峰谷倍率按账号/活动变），所以本仓**不内置单价表**：
+// 小浣熊的积分单价没有可引用的公开表（倍率按模型/活动变），所以本仓**不内置单价表**：
 // EstimateCredit 一律返回 ok=false，面板显示「—」——宁可空着，也不要拿别家模型的价格
-// 编一个看起来像真的数字（Qoder 与别家有大量同名模型，错配会静默给出错误金额）。
+// 编一个看起来像真的数字（小浣熊与别家有大量同名模型，错配会静默给出错误金额）。
 // 拿到可信单价后填进 listPricesCNY 即可，公式不用改。
 package usage
 
@@ -17,6 +17,7 @@ var listPricesCNY = map[string][3]float64{}
 // measuredDiscount / measuredOverride 是为实测拟合留的两个修正档，空表 = 不修正。
 var measuredDiscount = map[string]float64{}
 var measuredOverride = map[string][3]float64{}
+
 // modelKey 把网关的模型标识归一成价目表的键：去空白、转小写，并剥掉 CN 域前缀。
 //
 // 为什么要剥 "cn:"：同一条请求在网关里有两种入账形态——resolveModel 之后是裸名

@@ -248,7 +248,7 @@ let checkinState = {};
 function renderAccounts(list) {
   const tb = $('accBody');
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="11"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 Qoder 账号</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="11"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，粘贴一个小浣熊账号（access_token / refresh_token）</div></td></tr>';
     return;
   }
   tb.innerHTML = list.map(a => {
@@ -265,7 +265,7 @@ function renderAccounts(list) {
     const cs = checkinState[String(a.uid)];
     if (!a.disabled && cs === true) st.push(tag('mute', '今日已签'));
     else if (!a.disabled && cs === false) st.push(tag('warn', '今日未签'));
-    // 签到：Qoder 两区都有活动接口（国际版缺风控头时上游回空列表，结果会如实显示未签）。
+    // 签到：一次 setting_info 调用（上游幂等），拿不到就如实显示未签。
     const acts = ['<button class="xs" data-a="checkin" data-u="' + esc(a.uid) + '">签到</button>',
       '<button class="xs" data-a="balance" data-u="' + esc(a.uid) + '">刷新</button>',
       // 单号刷票：只动这个号，省掉整池保活。
@@ -340,7 +340,7 @@ async function loadOverview(quiet) {
       : (d.auth_scope === 'open' ? '⚠ 免密钥访问（已绑全接口）' : '本机免鉴权');
     // 网关基址现状（overview 的 agent_host_*）：上游换域名时这里是第一现场。
     $('agHostNote').textContent = d.agent_host_intl
-      ? '国际 ' + d.agent_host_intl + ' · 国内 ' + (d.agent_host_cn || '—') + ' '
+      ? '推理 ' + d.agent_host_intl + ' · 鉴权 ' + (d.agent_host_cn || '—') + ' '
       : '';
     const up = Math.floor(d.uptime_sec || 0);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') +
@@ -1177,7 +1177,7 @@ const CFG_MAP = {
   header_timeout_seconds: ['upstream', 'header_timeout_seconds'],
   idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'],
   user_agent: ['upstream', 'user_agent'], client_version: ['upstream', 'client_version'],
-  // 网关基址（留空 = 内置：国际 api3.qoder.sh / 国内 gateway.qoder.com.cn）
+  // 上游基址（留空 = 内置：推理 xiaohuanxiong.com/api/web/llm/v2 / 鉴权 …/auth/v1）
   gateway_host: ['upstream', 'gateway_host'], gateway_host_cn: ['upstream', 'gateway_host_cn'],
 };
 // ARRAY_FIELDS 逗号分隔提交成 JSON 数组（后端是 []int）；BOOL_FIELDS 用 select 的

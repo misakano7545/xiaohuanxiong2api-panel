@@ -11,8 +11,8 @@ package server
 import (
 	"strings"
 
-	"github.com/misakano7545/qoder2api-panel/internal/auth"
-	"github.com/misakano7545/qoder2api-panel/internal/upstream"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/upstream"
 )
 
 // strongModel 各地区的旗舰模型：别名没有更贴切的目标时就落到它。
@@ -24,34 +24,17 @@ func strongModel(realm string) string {
 }
 
 // modelAliases 显式别名（小写、已去 __ 后缀）。
-// ponytail: 网页端（work.trae.ai）那 11 个名字里，gemini/minimax/kimi-k2.5 只在
-// solo_coder 通道存在，且账号配额可能为 0（实测 4011）——这里仍照实映射，
-// 让客户端拿到上游的真话，而不是"unknown model"。
+// 小浣熊只有一套模型 id；这里把客户端写死的名字落到目录里的第一候选，
+// 目标不存在时 handler 会照实 400，而不是编一个上游不认的名字。
 var modelAliases = map[string]map[string]string{
 	auth.RealmCN: {
-		"gpt-4o": "glm-5.2", "gpt-4o-mini": "glm-5.2", "gpt-4.1": "glm-5.2",
-		"gpt-4-turbo": "glm-5.2", "gpt-4": "glm-5.2", "gpt-3.5-turbo": "glm-5.2",
-	},
-	auth.RealmIntl: {
-		"gpt-4o": "gpt-5.2", "gpt-4o-mini": "gpt-5.2", "gpt-4.1": "gpt-5.2",
-		"gpt-4-turbo": "gpt-5.2", "gpt-4": "gpt-5.2", "gpt-3.5-turbo": "gpt-5.2",
-		"gpt-5": "gpt-5.2", "gpt-5.1": "gpt-5.2",
-		// 网页端显示名 → 上游真名（coder 通道）。同一个模型的两个名字才映射；
-		// minimax-m3 这台账号的表里根本没有（只有 m2.7），不做降级映射，照实 400。
-		"gemini-3.1-pro-preview": "gemini-3.1-pro",
-		"gemini-3-flash-preview": "gemini-3-flash-solo",
-		"kimi-k2.5":              "kimi-k2.5",
+		"gpt-4o": "raccoon-chat-ml-5-5", "gpt-4o-mini": "raccoon-chat-ml-5-5",
+		"gpt-4.1": "raccoon-chat-ml-5-5", "gpt-4": "raccoon-chat-ml-5-5",
+		"gpt-3.5-turbo": "raccoon-chat-ml-5-5", "gpt-5": "raccoon-chat-ml-5-5",
 	},
 }
 
 // otherRealm 另一个地区（别名兜底用）。
-func otherRealm(realm string) string {
-	if realm == auth.RealmIntl {
-		return auth.RealmCN
-	}
-	return auth.RealmIntl
-}
-
 // aliasModel 查别名。claude-* 走前缀（Claude 客户端会带日期后缀，逐个登记不划算）。
 // 入参可能是 normalizeModelName 出来的「Claude-sonnet-4-5」（首字母被大写），统一转小写再比。
 // 本地区表里没有就查另一地区：网页端显示名（Gemini-3.1-Pro-Preview）不带地区信息，
@@ -61,10 +44,8 @@ func aliasModel(realm, model string) (string, bool) {
 	if strings.HasPrefix(model, "claude") {
 		return strongModel(realm), true
 	}
-	for _, r := range []string{realm, otherRealm(realm)} {
-		if m, ok := modelAliases[r][model]; ok {
-			return m, true
-		}
+	if m, ok := modelAliases[realm][model]; ok {
+		return m, true
 	}
 	return "", false
 }

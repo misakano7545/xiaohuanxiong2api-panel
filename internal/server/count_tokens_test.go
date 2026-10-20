@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// count_tokens 是本地估算（Qoder 没有计数接口）：正文越长估得越多，且不被结构字段带偏。
+// count_tokens 是本地估算（小浣熊没有计数接口）：正文越长估得越多，且不被结构字段带偏。
 func TestCountTokens(t *testing.T) {
 	h := newTestHandler(t, "http://127.0.0.1:1") // 无上游调用
 	post := func(body string) int {

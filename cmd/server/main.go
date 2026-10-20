@@ -1,4 +1,4 @@
-// main.go qoder2api-panel 入口：加载配置 → 构建 pool → 起 HTTP 服务。
+// main.go xiaohuanxiong2api-panel 入口：加载配置 → 构建 pool → 起 HTTP 服务。
 package main
 
 import (
@@ -16,15 +16,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/misakano7545/qoder2api-panel/internal/auth"
-	"github.com/misakano7545/qoder2api-panel/internal/panel"
-	"github.com/misakano7545/qoder2api-panel/internal/pool"
-	"github.com/misakano7545/qoder2api-panel/internal/reqlog"
-	"github.com/misakano7545/qoder2api-panel/internal/scheduler"
-	"github.com/misakano7545/qoder2api-panel/internal/server"
-	"github.com/misakano7545/qoder2api-panel/internal/session"
-	"github.com/misakano7545/qoder2api-panel/internal/upstream"
-	"github.com/misakano7545/qoder2api-panel/internal/usage"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/panel"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/pool"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/reqlog"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/scheduler"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/server"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/session"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/upstream"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/usage"
 )
 
 // appVersion 面板版本，透出到 /panel/api/overview 的 version（与 workbuddy2api-panel 同口径）。
@@ -61,14 +61,22 @@ func applyUpstream(up *upstream.Client, c *Config) {
 	// 网关基址：显式配置优先，留空回落内置常量。这里**必须显式写回**（不能只在非空时
 	// 赋值）：否则面板里清空该项后旧值会留在结构体里，用户以为清掉了其实没有。
 	// 写侧走 SetAgentHosts：请求路径在并发读这两个字段（applyUpstream 是热路径）。
-	global, cn := c.Upstream.GatewayHost, c.Upstream.GatewayHostCN
-	if global == "" {
-		global = upstream.AgentHost
+	llmBase, authBase := c.Upstream.LLMBase, c.Upstream.AuthBase
+	if llmBase == "" {
+		llmBase = upstream.LLMBase
 	}
-	if cn == "" {
-		cn = upstream.GatewayCN
+	if authBase == "" {
+		authBase = upstream.AuthBase
 	}
-	up.SetAgentHosts(global, cn)
+	up.SetAgentHosts(llmBase, authBase)
+	pointsBase, origin := c.Upstream.PointsBase, c.Upstream.Origin
+	if pointsBase == "" {
+		pointsBase = upstream.PointsBase
+	}
+	if origin == "" {
+		origin = upstream.Origin
+	}
+	up.SetAPIHosts(pointsBase, origin)
 }
 
 // usagePathFor 由 state 文件路径推出用量台账路径：同目录、文件名 usage.json。
@@ -270,7 +278,7 @@ func main() {
 	if strings.HasPrefix(host, ":") {
 		host = "127.0.0.1" + host
 	}
-	log.Printf("qoder2api-panel listening on %s (api_key=%v) panel http://%s/panel/", cfg.Listen, cfg.APIKey != "", host)
+	log.Printf("xhx2api-panel listening on %s (api_key=%v) panel http://%s/panel/", cfg.Listen, cfg.APIKey != "", host)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}

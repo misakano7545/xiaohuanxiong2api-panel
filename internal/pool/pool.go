@@ -26,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/misakano7545/qoder2api-panel/internal/auth"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
 )
 
 // CoolKind 冷却类型。
@@ -208,10 +208,9 @@ type Pool struct {
 
 // SetRandInt64N 注入抽签随机源：返回 0 即「权重最高者中签」（改造前的取最大语义），
 // 供需要确定性选号结果的测试使用（跨包测试用得上）。传 nil 还原默认随机源。
-// RotateMachineID 给账号换一套设备指纹（新的 cosy-machineid）并落盘，返回新值。
+// RotateMachineID 给账号换一套设备指纹并落盘，返回新值。
 //
-// Qoder 的设备身份就是 machineId：风控按它归组，换一套就能脱开旧标记；不能靠
-// 秒级重试（上游会延长限流窗口）。面板「换指纹」与调度器的自动轮换都走这一处。
+// 小浣熊不按设备归组，这个入口留着只是为了不改动面板与调度器的既有调用点。
 func (p *Pool) RotateMachineID(uid string) (machineID string, ok bool, err error) {
 	a := p.AuthByUID(uid)
 	if a == nil {
@@ -1023,7 +1022,7 @@ func (p *Pool) load() {
 	}
 	for uid, s := range sf.Accounts {
 		p.byUID[uid] = &entry{
-			a:                &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
+			a:                &auth.Auth{Data: auth.Data{UID: uid}}, // placeholder，Add 时会换成完整凭证
 			credits:          s.Credits,
 			creditsTotal:     s.CreditsTotal,
 			expire:           s.Expire,

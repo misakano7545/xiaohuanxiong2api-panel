@@ -6,7 +6,7 @@ package server
 import (
 	"strings"
 
-	"github.com/misakano7545/qoder2api-panel/internal/auth"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
 )
 
 // resolveModel 取第一个 ":"，前段恰为 "cn"/"intl"（大小写敏感）才当地区前缀；否则整串按裸名、

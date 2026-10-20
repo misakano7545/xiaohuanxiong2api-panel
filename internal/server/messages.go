@@ -2,7 +2,7 @@
 // ponytail: 不存会话；客户端每轮带全量 messages。上游 reasoning_content 无 signature，
 // 作为 thinking 块下发展示；客户端回传的 thinking 块丢弃（不触发签名校验）。
 // top_k / cache_control / context_management / betas 上游 chat 没有对应物，丢掉。
-// count_tokens 单独回答（见 countTokens：按字符粗估，Qoder 没有计数接口）。
+// count_tokens 单独回答（见 countTokens：按字符粗估，小浣熊没有计数接口）。
 // 内置服务端工具（web_search / code_execution / bash_* …）没有本地执行器，丢掉并在 system 里写明。
 // usage 缓存字段走 SOLO 直报（cache_read_/cache_creation_input_tokens 原样透出），截断映射 refusal。
 package server
@@ -59,7 +59,7 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	h.chatCompletions(rw, r2)
 }
 
-// countTokens 回答 Anthropic 的 POST /v1/messages/count_tokens。Qoder 上游没有计数接口，
+// countTokens 回答 Anthropic 的 POST /v1/messages/count_tokens。小浣熊上游没有计数接口，
 // 按字符数/4 粗估（借鉴 magpie 对无计数能力 provider 的处理）：Claude Code 用它判断上下文
 // 余量，估偏 10% 比 404 让它自己猜要好。shortcut: 字符/4，对中文偏低估，需要精确时接真分词器。
 func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
@@ -83,7 +83,7 @@ func (h *Handler) countTokens(w http.ResponseWriter, r *http.Request) {
 
 // countTokensEstimate 按字符类型折算 token：实测中文 0.62 token/字、英文约 4 字符/token
 // （2026-10 长上下文针测试：400k 汉字 = 249,847 token）。纯 chars/4 对中文低估 2.5 倍。
-// 不含 Qoder 上游自己注入的系统提示（客户端看不到，随请求固定，不影响力度的判断）。
+// 不含上游自己注入的系统提示（客户端看不到，随请求固定，不影响力度的判断）。
 func tokenEstimate(runes []rune) int {
 	n := 0.0
 	for _, r := range runes {

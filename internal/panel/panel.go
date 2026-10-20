@@ -19,12 +19,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/misakano7545/qoder2api-panel/internal/auth"
-	"github.com/misakano7545/qoder2api-panel/internal/pool"
-	"github.com/misakano7545/qoder2api-panel/internal/reqlog"
-	"github.com/misakano7545/qoder2api-panel/internal/scheduler"
-	"github.com/misakano7545/qoder2api-panel/internal/upstream"
-	"github.com/misakano7545/qoder2api-panel/internal/usage"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/pool"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/reqlog"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/scheduler"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/upstream"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/usage"
 )
 
 // Config 面板依赖。AuthDir 用进程启动时的目录，改配置里的路径要重启才生效。
@@ -724,9 +724,9 @@ func (p *Panel) refreshBalance(uid string) error {
 	return nil
 }
 
-// rotateDevice 给账号换一套设备指纹（新的 cosy-machineid）并落盘。
+// rotateDevice 给账号换一套设备指纹并落盘。
 //
-// 用途：Qoder 的风控/活动按设备归组，换设备号能脱开旧标记。**只在用户点按钮时发生**：
+// 用途：小浣熊不按设备归组，这个按钮留着不影响什么。**只在用户点按钮时发生**：
 // 自动换指纹会打断账号的稳定身份，这里是显式的人工动作。
 func (p *Panel) rotateDevice(uid string) error {
 	machineID, ok, err := p.cfg.Pool.RotateMachineID(uid)
@@ -786,7 +786,7 @@ var uidRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 func validUID(s string) bool { return uidRE.MatchString(s) }
 
-// authPath 只允许 auths/qoder-{uid}.json，拒绝路径穿越。
+// authPath 只允许 auths/{uid}.json，拒绝路径穿越。
 func authPath(dir, uid string) (string, error) {
 	if dir == "" || !validUID(uid) {
 		return "", fmt.Errorf("bad uid")

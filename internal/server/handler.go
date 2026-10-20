@@ -14,13 +14,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/misakano7545/qoder2api-panel/internal/auth"
-	"github.com/misakano7545/qoder2api-panel/internal/pool"
-	"github.com/misakano7545/qoder2api-panel/internal/prompt"
-	"github.com/misakano7545/qoder2api-panel/internal/reqlog"
-	"github.com/misakano7545/qoder2api-panel/internal/session"
-	"github.com/misakano7545/qoder2api-panel/internal/upstream"
-	"github.com/misakano7545/qoder2api-panel/internal/usage"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/pool"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/prompt"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/reqlog"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/session"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/upstream"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/usage"
 )
 
 // Config handler 依赖。
@@ -77,8 +77,8 @@ func NewHandler(cfg Config) *Handler {
 		cfg.MaxRotate = 3
 	}
 	if cfg.RefreshSkew <= 0 {
-		// Qoder 的 access token 寿命约 24 小时：提前 10 分钟续期即可。
-		// （旧值 24h 在 Qoder 上会让每个请求都触发一次续期。）
+		// 小浣熊 access token 是 JWT，寿命通常 24 小时：提前 10 分钟续期即可。
+		// （把窗口设成 token 全寿命会让每个请求都触发一次续期。）
 		cfg.RefreshSkew = 10 * time.Minute
 	}
 	if cfg.DefaultModel == "" {
@@ -235,7 +235,7 @@ func (h *Handler) modelList() []map[string]any {
 			"id":                mi.Realm + ":" + mi.ID,
 			"object":            "model",
 			"created":           1753600000,
-			"owned_by":          "qoder-" + mi.Realm,
+			"owned_by":          "raccoon-" + mi.Realm,
 			"context_length":    mi.ContextWindow,
 			"max_output_tokens": mi.MaxOutput,
 			"reasoning":         mi.Reasoning,
@@ -422,7 +422,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if queueHopeless(lastErr) {
 				msg = "上游当前对该模型不可服务（" + peek.Model + "，serviceAvailable=false）：这是上游容量/套餐侧状态，与账号无关，请稍后再发或换模型"
 			}
-			writeOpenAIError(w, http.StatusServiceUnavailable, "qoder_model_busy", msg)
+			writeOpenAIError(w, http.StatusServiceUnavailable, "raccoon_model_busy", msg)
 			return
 		}
 		var se *upstream.StreamError
@@ -559,7 +559,7 @@ func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, acct *auth
 		usg, serr := upstream.StreamWithError(w, rc, func(se *upstream.StreamError) {
 			streamErr = true
 			h.handleStreamError(acct.UID, se)
-		})
+		}, peek.Model)
 		rc.Close()
 		// serr 非 nil 只可能是「一个字节都没写给客户端」的失败（空流 / 首帧就是错误信封）：
 		// 此时响应还没提交，必须交回调用方换号或如实回错误体——早先这里只处理空流，
@@ -581,7 +581,7 @@ func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, acct *auth
 		return true, nil
 	}
 
-	resp, err := upstream.Aggregate(rc)
+	resp, err := upstream.Aggregate(rc, peek.Model)
 	rc.Close() // 已完全消费，立即释放上游连接（防轮转 continue 泄漏 body）
 	if err != nil {
 		var se *upstream.StreamError

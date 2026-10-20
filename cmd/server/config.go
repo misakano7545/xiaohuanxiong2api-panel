@@ -1,6 +1,6 @@
-// config.go 加载 JSON 配置 + Q2A_* 环境变量覆盖。
+// config.go 加载 JSON 配置 + Q2A_* 环境变量覆盖（小浣熊版：上游键名换成 llm/auth/points/origin）。
 //
-// 结构对齐 WorkBuddy 面板（同段同键，两个面板可以对照着读），只保留 Qoder 真有的能力：
+// 结构对齐 WorkBuddy 面板（同段同键，两个面板可以对照着读），只保留小浣熊真有的能力：
 // 没有对应实现的键（活动任务、域名自动跟进、Max 出站面…）不写进来——空壳字段改了没反应，
 // 比没有更误导。
 //
@@ -23,12 +23,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/misakano7545/qoder2api-panel/internal/prompt"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/prompt"
 )
 
 // Config 顶层配置。
 type Config struct {
-	Listen    string `json:"listen"`     // ":7864"
+	Listen    string `json:"listen"`     // "127.0.0.1:7867"
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权（仅本机用）；单一来源就是这一项
 	AuthDir   string `json:"auth_dir"`   // "./auths"
 	StateFile string `json:"state_file"` // "./data/state.json"
@@ -62,14 +62,16 @@ type Config struct {
 		HeaderTimeoutSeconds int `json:"header_timeout_seconds"`
 		// IdleTimeoutSeconds 聊天 SSE 流内空闲上限（持续吐数据不掐）；<=0 回落 300。
 		IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
-		// UserAgent 出站 UA 覆盖；空 = 内置 qoder-local-proxy。
+		// UserAgent 出站 UA 覆盖；空 = 内置 xhx2api-panel。
 		UserAgent string `json:"user_agent"`
-		// ClientVersion Qoder 客户端版本段（面板展示客户端身份用）；空 = 内置默认。
+		// ClientVersion 小浣熊没有客户端版本段（保留键只为兼容旧配置文件）。
 		ClientVersion string `json:"client_version"`
-		// GatewayHost / GatewayHostCN 显式钉死推理网关基址（热生效）。留空 = 内置常量：
-		// 国际 https://api3.qoder.sh/ 、国内 https://gateway.qoder.com.cn/ 。
-		GatewayHost   string `json:"gateway_host"`
-		GatewayHostCN string `json:"gateway_host_cn"`
+		// LLMBase / AuthBase 是小浣熊的推理网关与鉴权基址（热生效），留空回落内置常量。
+		LLMBase  string `json:"llm_base"`
+		AuthBase string `json:"auth_base"`
+		// PointsBase / Origin 是积分与主站基址（额度查询、每日积分发放挂在这两个域名下）。
+		PointsBase string `json:"points_base"`
+		Origin     string `json:"origin"`
 	} `json:"upstream"`
 
 	Pool struct {
@@ -132,7 +134,7 @@ type Config struct {
 // Default 返回默认配置。
 func Default() *Config {
 	c := &Config{
-		Listen:       ":7864",
+		Listen:       "127.0.0.1:7867",
 		APIKey:       "",
 		AuthDir:      "./auths",
 		StateFile:    "./data/state.json",
@@ -277,8 +279,17 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("Q2A_USER_AGENT"); v != "" {
 		c.Upstream.UserAgent = v
 	}
-	if v := os.Getenv("Q2A_CLIENT_VERSION"); v != "" {
-		c.Upstream.ClientVersion = v
+	if v := os.Getenv("Q2A_LLM_BASE"); v != "" {
+		c.Upstream.LLMBase = v
+	}
+	if v := os.Getenv("Q2A_AUTH_BASE"); v != "" {
+		c.Upstream.AuthBase = v
+	}
+	if v := os.Getenv("Q2A_POINTS_BASE"); v != "" {
+		c.Upstream.PointsBase = v
+	}
+	if v := os.Getenv("Q2A_ORIGIN"); v != "" {
+		c.Upstream.Origin = v
 	}
 	if v := os.Getenv("Q2A_MAX_IN_FLIGHT"); v != "" {
 		envInt("Q2A_MAX_IN_FLIGHT", v, &c.Pool.MaxInFlight)
@@ -415,11 +426,11 @@ func (c *Config) normalize() error {
 		c.Logging.RequestArchiveMaxMB = 64
 	}
 	if c.Listen == "" {
-		c.Listen = ":7864"
+		c.Listen = "127.0.0.1:7867"
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
-		// 裸端口补成 ":7864" = 监听**所有网卡**，不是仅本机。默认绑定不动（线上靠它），
-		// 只把后果说清楚——运维以为「7864」是本机端口时，面板其实是全网可达的。
+		// 裸端口补成 ":7867" = 监听**所有网卡**，不是仅本机。默认绑定不动（线上靠它），
+		// 只把后果说清楚——运维以为「7867」是本机端口时，面板其实是全网可达的。
 		log.Printf("config: listen=%q 是裸端口 → 按所有网卡监听（:%s）；要仅本机请显式写 127.0.0.1:%s",
 			c.Listen, c.Listen, c.Listen)
 		c.Listen = ":" + c.Listen

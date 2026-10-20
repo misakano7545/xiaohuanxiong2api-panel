@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/misakano7545/qoder2api-panel/internal/reqlog"
-	"github.com/misakano7545/qoder2api-panel/internal/usage"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/reqlog"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/usage"
 )
 
 // 请求级指标追踪：给对话类入站路径套一层中间件，记录时间/结果/模型/账号/来源/耗时/请求 ID。

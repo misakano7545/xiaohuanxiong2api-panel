@@ -1,12 +1,12 @@
 services:
-  q2api:
+  xhx2api:
     build: .
-    container_name: qoder2api-panel
+    container_name: xiaohuanxiong2api-panel
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
     ports:
-      - "7864:7864"
+      - "7867:7867"
     volumes:
       - ./auths:/app/auths
       - ./data:/app/data

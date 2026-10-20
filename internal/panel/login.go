@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/misakano7545/qoder2api-panel/internal/auth"
-	"github.com/misakano7545/qoder2api-panel/internal/upstream"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/upstream"
 )
 
 const (
@@ -95,7 +95,7 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 // loginPoll 查一次授权结果：未完成 → {done:false}（前端每 3s 再问）；
 // 会话不存在/过期 → 410（前端停止轮询）；完成 → 落盘入池并回 {done:true}。
 //
-// 做成「一次一查」而不是服务端长等：Qoder 设备流没有回调，verifier 又只能在服务端，
+// 做成「一次一查」而不是服务端长等：设备流没有回调，verifier 又只能在服务端，
 // 所以必须有人轮询——让浏览器按固定节拍问，用户什么时候授权完都在下一次问到时收号，
 // 不需要再点一次「我已授权」。
 func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
@@ -177,31 +177,8 @@ func (p *Panel) loginRefresh(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "请填写 refreshToken")
 		return
 	}
-	realm := upstream.RegionGlobal
-	if strings.EqualFold(strings.TrimSpace(req.Realm), upstream.RegionCN) {
-		realm = upstream.RegionCN
-	}
-	var creds *auth.Auth
-	if strings.Contains(rt, "|") {
-		// 已经是打包形态（token|uid|machine）：直接解析，保留原设备号。
-		parsed, err := auth.Parse([]byte(`{"mode":"` + realm + `","refreshToken":"` + rt + `"}`))
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, "refreshToken 格式无效："+err.Error())
-			return
-		}
-		if parsed.UID == "" {
-			writeErr(w, http.StatusBadRequest, "打包的 refreshToken 缺少用户标识，请粘贴完整账号记录")
-			return
-		}
-		if err := parsed.CompleteIdentity(newMachineID()); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		creds = parsed
-	} else {
-		machine := newMachineID()
-		creds = &auth.Auth{RefreshToken: auth.PackRefresh(rt, "", machine), RealmID: realm, MachineID: machine}
-	}
+	// 小浣熊的 refresh_token 是上游直给的 JWT，没有 Qoder 那种 token|uid|machine 打包串。
+	creds := &auth.Auth{Data: auth.Data{RefreshToken: rt}}
 	if err := p.completeByRefresh(r.Context(), creds); err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return

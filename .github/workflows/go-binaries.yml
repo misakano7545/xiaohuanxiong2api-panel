@@ -73,15 +73,15 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          BIN=q2api
-          [ "$GOOS" = windows ] && BIN=q2api.exe
+          BIN=xhx2api
+          [ "$GOOS" = windows ] && BIN=xhx2api.exe
           go build -trimpath -ldflags "-s -w -X main.appVersion=${{ steps.ver.outputs.v }}" -o "$BIN" ./cmd/server
 
       # 断言二进制里的版本串：交叉编译矩阵里编错树/漏 ldflags 都靠这条拦住
       - name: 断言二进制版本串
         run: |
-          BIN=q2api
-          [ "${{ matrix.goos }}" = windows ] && BIN=q2api.exe
+          BIN=xhx2api
+          [ "${{ matrix.goos }}" = windows ] && BIN=xhx2api.exe
           if ! grep -qa "${{ steps.ver.outputs.v }}" "$BIN"; then
             echo "::error::binary missing version string ${{ steps.ver.outputs.v }}"
             exit 1
@@ -93,11 +93,11 @@ jobs:
           set -euo pipefail
           V="${{ steps.ver.outputs.v }}"
           if [ "${{ matrix.goos }}" = windows ]; then
-            NAME="qoder2api-panel-panel-v${V}-windows-${{ matrix.goarch }}.zip"
-            zip -q "$NAME" q2api.exe config.example.json README.md
+            NAME="xiaohuanxiong2api-panel-v${V}-windows-${{ matrix.goarch }}.zip"
+            zip -q "$NAME" xhx2api.exe config.example.json README.md
           else
-            NAME="qoder2api-panel-panel-v${V}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
-            tar czf "$NAME" q2api config.example.json README.md
+            NAME="xiaohuanxiong2api-panel-v${V}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
+            tar czf "$NAME" xhx2api config.example.json README.md
           fi
           echo "name=$NAME" >> "$GITHUB_ENV"
           ls -la "$NAME"

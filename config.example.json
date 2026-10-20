@@ -1,9 +1,9 @@
 {
-  "listen": ":7864",
+  "listen": "127.0.0.1:7867",
   "api_key": "",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
-  "default_model": "Auto",
+  "default_model": "raccoon-chat-ml-5-5",
   "cooldown": {
     "plan_credit": "12h",
     "soft_rate": "60s",
@@ -27,8 +27,10 @@
     "idle_timeout_seconds": 300,
     "user_agent": "",
     "client_version": "",
-    "gateway_host": "",
-    "gateway_host_cn": ""
+    "llm_base": "",
+    "auth_base": "",
+    "points_base": "",
+    "origin": ""
   },
   "pool": {
     "max_in_flight": 3,

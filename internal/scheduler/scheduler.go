@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/misakano7545/qoder2api-panel/internal/auth"
-	"github.com/misakano7545/qoder2api-panel/internal/pool"
-	"github.com/misakano7545/qoder2api-panel/internal/upstream"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/pool"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/upstream"
 )
 
 // Config 调度器依赖。
@@ -361,7 +361,7 @@ func (s *Scheduler) byUrgency() []string {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
-		// 国际号也要进签到队列：Qoder 两区都有活动接口（国际版缺风控头时上游回空列表，
+		// 所有号都要进签到队列：小浣熊的每日积分发放对所有账号一致（
 		// CheckinUID 会按「上游未开」如实跳过，而不是这里直接不排队）。
 		expire := int64(0)
 		if u, err := s.entUsageOf(st.UID, a); err == nil {
@@ -412,7 +412,7 @@ func (s *Scheduler) CheckinUID(uid string) (CheckinResult, error) {
 	if a == nil || a.RefreshTokenValue() == "" {
 		return res, fmt.Errorf("no refresh token")
 	}
-	// Qoder 两区都有签到活动接口（sash campaigns）：国际版要设备风控头才拿得到活动，
+	// 小浣熊的签到就是一次 setting_info 调用（幂等），
 	// 拿不到时上游返回空列表，CheckinStatus 会如实给出 enable=false，由下面的分支按
 	// 「上游未开」跳过——不再按地区硬跳过。
 	// 签到前把 access token 换新的：9 点签到离上一次保活（凌晨 3 点）有段距离，拿一张

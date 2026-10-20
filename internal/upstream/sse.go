@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -95,8 +94,10 @@ func (b *lineBuffer) finish() []string {
 	return nil
 }
 
-// parseSSELine 解析一行 data: 之后的内容：
-// 外层是 {"statusCodeValue":200,"body":"<内层 chunk JSON>"}，内层才是 OpenAI chunk。
+// parseSSELine 解析一行 data: 之后的内容。
+//
+// 小浣熊的 chat 网关就是 OpenAI 形状：一帧一个完整 chunk（没有信封），
+// 错误用 {"error":{...}} 或 {code:非0,message:...} 表达。
 func parseSSELine(data string) sseEvent {
 	trimmed := strings.TrimSpace(data)
 	if trimmed == "" {
@@ -105,79 +106,68 @@ func parseSSELine(data string) sseEvent {
 	if trimmed == "[DONE]" {
 		return sseEvent{Kind: sseDone}
 	}
-	var envelope map[string]any
-	if err := json.Unmarshal([]byte(trimmed), &envelope); err != nil {
+	var chunk map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &chunk); err != nil {
 		return sseEvent{Kind: sseSkip}
 	}
-	if status, ok := intOf(envelope["statusCodeValue"]); ok && status != 200 {
-		raw := ""
-		switch body := envelope["body"].(type) {
-		case string:
-			raw = body
-		case nil:
-		default:
-			if encoded, err := json.Marshal(body); err == nil {
-				raw = string(encoded)
-			}
+	if errObj, ok := chunk["error"].(map[string]any); ok {
+		raw := trimmed
+		if encoded, err := json.Marshal(errObj); err == nil {
+			raw = string(encoded)
 		}
-		class := classifyErrorText(status, raw)
-		return sseEvent{Kind: sseError, Status: status, Class: class, Raw: truncate(raw, 500),
+		class := classifyErrorText(raw)
+		return sseEvent{Kind: sseError, Status: statusOfError(chunk, errObj), Class: class, Raw: truncate(raw, 500),
 			Message: messageOf(class), RetryAfterSecs: retryAfterOf(raw), ServiceUnavailable: queueUnavailable(raw)}
 	}
-	inner, ok := envelope["body"]
-	if !ok {
-		return sseEvent{Kind: sseSkip}
-	}
-	if text, ok := inner.(string); ok {
-		if text == "[DONE]" {
-			return sseEvent{Kind: sseDone}
+	if code, ok := intOf(chunk["code"]); ok && code != 0 {
+		class := classifyErrorText(trimmed)
+		status := 502
+		if class == ErrSoftRate {
+			status = http.StatusTooManyRequests
 		}
-		var chunk map[string]any
-		if err := json.Unmarshal([]byte(text), &chunk); err != nil {
-			return sseEvent{Kind: sseSkip}
+		if msg := text(chunk, "message", "msg"); msg != "" {
+			return sseEvent{Kind: sseError, Status: status, Class: class, Raw: truncate(trimmed, 500),
+				Message: msg, RetryAfterSecs: retryAfterOf(trimmed), ServiceUnavailable: queueUnavailable(trimmed)}
 		}
-		return sseEvent{Kind: sseChunk, Chunk: chunk}
+		return sseEvent{Kind: sseError, Status: status, Class: class, Raw: truncate(trimmed, 500),
+			Message: messageOf(class), RetryAfterSecs: retryAfterOf(trimmed), ServiceUnavailable: queueUnavailable(trimmed)}
 	}
-	if inner == nil {
-		return sseEvent{Kind: sseSkip}
-	}
-	if chunk, ok := inner.(map[string]any); ok {
-		return sseEvent{Kind: sseChunk, Chunk: chunk}
-	}
-	return sseEvent{Kind: sseSkip}
+	return sseEvent{Kind: sseChunk, Chunk: chunk}
 }
 
-// classifyErrorText 是信封内业务的分类：先按码/关键词判额度，再按传输层状态。
-func classifyErrorText(status int, raw string) ErrKind {
+// statusOfError 取错误对象里的状态码（没有就按分类给）。
+func statusOfError(chunk, errObj map[string]any) int {
+	for _, src := range []map[string]any{errObj, chunk} {
+		for _, key := range []string{"status", "status_code", "statusCode"} {
+			if n, ok := intOf(src[key]); ok && n >= 400 {
+				return n
+			}
+		}
+	}
+	if classifyErrorText(text(errObj, "message", "type")) == ErrSoftRate {
+		return http.StatusTooManyRequests
+	}
+	return 502
+}
+
+// classifyErrorText 分类流内错误：先看排队/额度关键词，再看限流与登录态。
+func classifyErrorText(raw string) ErrKind {
 	lower := strings.ToLower(raw)
-	if messageHasQueue(raw) {
+	if queueUnavailable(raw) {
 		return ErrBusy
 	}
-	for _, code := range []string{authCode} {
-		if rawHasCode(raw, code) {
-			return ErrSessionDead
-		}
-	}
-	for _, code := range quotaCodes() {
-		if rawHasCode(raw, code) {
-			return ErrPlanLimit
-		}
-	}
-	for _, signal := range []string{"pricingurl", "insufficient", "no_quota", "quota_exceed", "exceed_quota", "subscription", "upgrade"} {
+	for _, signal := range []string{"insufficient", "no_quota", "quota_exceed", "exceed_quota", "积分不足", "余额不足"} {
 		if strings.Contains(lower, signal) {
 			return ErrPlanLimit
 		}
 	}
-	if status == 429 || strings.Contains(lower, "rate limit") || strings.Contains(lower, "too many") {
+	if strings.Contains(lower, "rate limit") || strings.Contains(lower, "too many") || strings.Contains(raw, "429") {
 		return ErrSoftRate
 	}
-	if status == 401 {
+	if strings.Contains(lower, "unauthorized") || strings.Contains(lower, "token") || strings.Contains(raw, "401") {
 		return ErrSessionDead
 	}
-	if status == 403 {
-		return ErrClient
-	}
-	if status >= 500 {
+	if strings.Contains(lower, "server") || strings.Contains(raw, "500") || strings.Contains(raw, "502") {
 		return ErrServer
 	}
 	return ErrNone
@@ -197,23 +187,6 @@ func messageOf(kind ErrKind) string {
 		return "上游服务异常"
 	}
 	return "上游拒绝了本次请求"
-}
-
-// messageHasQueue 识别排队态（业务码 10605 或其语义等价字段）。
-func messageHasQueue(raw string) bool {
-	if rawHasCode(raw, queueCode) {
-		return true
-	}
-	lower := strings.ToLower(raw)
-	return strings.Contains(lower, "isqueued") || strings.Contains(lower, `"queuetype"`)
-}
-
-// rawHasCode 是裸文本兜底：正文不是 JSON 时也能认出业务码。
-func rawHasCode(raw, code string) bool {
-	flat := strings.ReplaceAll(raw, "\\", "")
-	return strings.Contains(flat, `"code":"`+code+`"`) ||
-		strings.Contains(flat, `"code":`+code) ||
-		strings.Contains(flat, `"code": "`+code+`"`)
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +209,8 @@ type accumulator struct {
 	finish    string
 	usage     map[string]any
 	sawAny    bool
+	// forceModel 是客户端请求的模型名：出站帧一律用它，压掉上游的内部名。
+	forceModel string
 }
 
 func newAccumulator() *accumulator {
@@ -249,6 +224,9 @@ func (a *accumulator) add(chunk map[string]any) []delta {
 	}
 	if model, ok := chunk["model"].(string); ok && model != "" {
 		a.model = model
+	}
+	if a.forceModel != "" {
+		a.model = a.forceModel
 	}
 	if created, ok := intOf(chunk["created"]); ok && created > 0 {
 		a.created = int64(created)
@@ -390,8 +368,9 @@ const (
 // 非流式
 
 // Aggregate 把上游 SSE 汇聚成一个 chat.completion 对象。
-func Aggregate(r io.Reader) (map[string]any, error) {
+func Aggregate(r io.Reader, model string) (map[string]any, error) {
 	acc := newAccumulator()
+	acc.forceModel = model
 	buf := &lineBuffer{}
 	reader := bufio.NewReaderSize(r, 64*1024)
 	for {
@@ -444,14 +423,15 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 // 流式
 
 // Stream 转发 SSE（不关心错误回调）。
-func Stream(w http.ResponseWriter, r io.Reader) error {
-	_, err := StreamWithError(w, r, nil)
+func Stream(w http.ResponseWriter, r io.Reader, model string) error {
+	_, err := StreamWithError(w, r, nil, model)
 	return err
 }
 
 // StreamWithError 把上游信封里的内层 chunk 转成 OpenAI SSE 帧写给客户端。
 // 遇到流内业务错误时回调 onErr（非 nil）并注入错误帧收尾；返回末帧 usage。
-func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*StreamError)) (map[string]any, error) {
+// model 是客户端请求的模型名：小浣熊会把帧里的 model 换成它的内部名，出站帧必须改回来。
+func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*StreamError), model string) (map[string]any, error) {
 	fl, _ := w.(http.Flusher)
 	var wrote bool
 	ensureHeaders := func() {
@@ -491,6 +471,7 @@ func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*StreamError
 	}
 
 	acc := newAccumulator()
+	acc.forceModel = model
 	guard := &reasoningGuard{}
 	roleSent := false
 	frame := func(d map[string]any, finish string) map[string]any {
@@ -663,25 +644,4 @@ func stripThinkingTags(text string) string {
 		out = strings.ReplaceAll(out, pair[1], "")
 	}
 	return out
-}
-
-// intOf 把 JSON 数字/数字字符串归一成 int。
-func intOf(value any) (int, bool) {
-	switch typed := value.(type) {
-	case float64:
-		return int(typed), true
-	case int:
-		return typed, true
-	case int64:
-		return int(typed), true
-	case json.Number:
-		if n, err := typed.Int64(); err == nil {
-			return int(n), true
-		}
-	case string:
-		if n, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
-			return n, true
-		}
-	}
-	return 0, false
 }
