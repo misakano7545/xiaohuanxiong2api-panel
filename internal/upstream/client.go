@@ -35,9 +35,9 @@ const (
 	// 不存在「调 setting_info 触发发放」这种客户端侧开关——旧 DailyGrantPath
 	// 是对抓包的误读。登录领取动作是 desktop 域的 grant（幂等，领过了回
 	// granted:false），流水查询是 points 域的 bills。
-	DesktopBase      = Origin + "/api/web/desktop/v1"
-	PointsGrantPath  = "/login/points/grant"
-	PointsBillsPath  = "/bills"
+	DesktopBase     = Origin + "/api/web/desktop/v1"
+	PointsGrantPath = "/login/points/grant"
+	PointsBillsPath = "/bills"
 	// limit 必须给足：流水按时间倒序，重度使用一天几十条 -N 消费记录会把
 	// 今日 +300 的 daily_grant 挤出前 10 条，签到状态就会误判 false。
 	PointsBillsQuery = "paging.limit=100&type=all&paging.offset=0"
@@ -143,15 +143,71 @@ const CodeExpired = 200035
 // IsCheckinRateLimited 小浣熊签到没有专用限流码。
 func IsCheckinRateLimited(error) bool { return false }
 
+// 失败分类的判据表（HTTP 与流内共用，别各写一份）。
+//
+// 教训来自同类实现的审计记录：`insufficient` 单独出现太宽——"context window is
+// insufficient for this model" 也会命中，于是给一个只是上下文太长的**好号**写 12 小时
+// 计划冷却；而 `token` 单独出现同样过宽——"max_tokens exceeded" 会把号记成登录态失效，
+// 连续几次就自动禁用。两条都是「静默误伤可用账号」，比漏判贵得多。
+//
+// 方向：宁可漏判（不罚号、只换号重试），不可误伤。
+
+// quotaSignal 文案里是否**确实**在说额度/余额不足。
+func quotaSignal(lower string) bool {
+	if strings.Contains(lower, "14018") || strings.Contains(lower, "credits exhausted") {
+		return true
+	}
+	if strings.Contains(lower, "insufficient") {
+		for _, w := range []string{"point", "credit", "balance", "quota", "余额", "积分", "额度"} {
+			if strings.Contains(lower, w) {
+				return true
+			}
+		}
+	}
+	for _, pair := range [][2]string{
+		{"积分", "不足"}, {"积分", "耗尽"}, {"额度", "不足"}, {"额度", "耗尽"},
+		{"余额", "不足"}, {"余额", "耗尽"}, {"quota", "exceeded"}, {"quota", "exhausted"},
+	} {
+		if strings.Contains(lower, pair[0]) && strings.Contains(lower, pair[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// sessionDeadSignal 文案里是否**确实**在说登录态失效（不含泛化的 "token"）。
+func sessionDeadSignal(lower string) bool {
+	for _, s := range []string{
+		"unauthorized", "invalid token", "token expired", "token is expired",
+		"token_expired", "authorization_verify_error", "invalid_grant",
+		"登录态已失效", "凭证已失效", "请重新登录",
+	} {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // Classify 按 HTTP 状态与正文判定错误类别。
+//
+// 文案判据与流内的 classifyErrorText 共用 quotaSignal / sessionDeadSignal（见上）：
+// 各写一份必然漂移，同一报文会在 HTTP 与 SSE 两条路径上被判成不同类别。
 func Classify(status int, body string) ErrKind {
 	lower := strings.ToLower(body)
 	switch {
+	// 认证类**先判**：403 可能只是权限问题，落到下面的额度文案会白白封号。
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		return ErrSessionDead
 	case status == http.StatusTooManyRequests:
 		return ErrSoftRate
-	case status == http.StatusBadGateway || status == http.StatusGatewayTimeout:
+	case status == http.StatusGatewayTimeout:
+		return ErrGateway
+	case status == http.StatusRequestTimeout || status == 499:
+		// 499（nginx「client closed request」）/408：调用方在响应完成前断开，多为请求体
+		// 过大或上游超时。换号重发只会照样失败、把每个号都记一次错，所以归「客户端侧」。
+		return ErrClient
+	case status == http.StatusBadGateway:
 		return ErrGateway
 	case status >= 500:
 		return ErrServer
@@ -161,10 +217,8 @@ func Classify(status int, body string) ErrKind {
 	if queueUnavailable(body) {
 		return ErrBusy
 	}
-	for _, signal := range []string{"insufficient", "no_quota", "quota_exceed", "exceed_quota", "积分不足", "余额不足"} {
-		if strings.Contains(lower, signal) {
-			return ErrPlanLimit
-		}
+	if quotaSignal(lower) || status == http.StatusPaymentRequired {
+		return ErrPlanLimit
 	}
 	if status >= 400 {
 		return ErrClient

@@ -94,6 +94,9 @@ func New(cfg Config) *Panel {
 	// 环回授权回调不带 Bearer：它是浏览器跳转过来的，不是面板前端发的请求（见 authCallback）。
 	p.mux.HandleFunc("GET /auth/callback", p.authCallback)
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
+	// 微信扫码登录：不需要回调地址，服务器/局域网部署也能用（见 qrlogin.go）。
+	p.mux.HandleFunc("POST /panel/api/login/qr/start", p.withAuth(p.loginQrStart))
+	p.mux.HandleFunc("GET /panel/api/login/qr.png", p.withAuth(p.loginQrImage))
 	// 粘贴回调链接（跨机/服务器部署时 127.0.0.1 回调到不了，走这条）。
 	p.mux.HandleFunc("POST /panel/api/login/code", p.withAuth(p.loginCode))
 	// refreshToken 直登：不经过浏览器把号加进来（对方只给了一条 refresh_token 时的备用入口）。

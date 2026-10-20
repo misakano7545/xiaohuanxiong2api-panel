@@ -150,21 +150,24 @@ func statusOfError(chunk, errObj map[string]any) int {
 	return 502
 }
 
-// classifyErrorText 分类流内错误：先看排队/额度关键词，再看限流与登录态。
+// classifyErrorText 分类流内错误：与 HTTP 的 Classify 共用同一张判据表。
+//
+// 这里最容易犯的错是「文案宽判」：`token` 单独出现就记登录态失效——而 "max_tokens
+// 超限" 之类的报文到处都有，几次下来账号就被自动禁用；`insufficient` 单独出现就记
+// 额度不足——"context window is insufficient" 同样命中，一句参数错换来 12 小时冷却。
+// 所以改判词（sessionDeadSignal / quotaSignal）都收窄到「确实在说这件事」。
 func classifyErrorText(raw string) ErrKind {
 	lower := strings.ToLower(raw)
 	if queueUnavailable(raw) {
 		return ErrBusy
 	}
-	for _, signal := range []string{"insufficient", "no_quota", "quota_exceed", "exceed_quota", "积分不足", "余额不足"} {
-		if strings.Contains(lower, signal) {
-			return ErrPlanLimit
-		}
+	if quotaSignal(lower) {
+		return ErrPlanLimit
 	}
 	if strings.Contains(lower, "rate limit") || strings.Contains(lower, "too many") || strings.Contains(raw, "429") {
 		return ErrSoftRate
 	}
-	if strings.Contains(lower, "unauthorized") || strings.Contains(lower, "token") || strings.Contains(raw, "401") {
+	if sessionDeadSignal(lower) || strings.Contains(raw, "401") {
 		return ErrSessionDead
 	}
 	if strings.Contains(lower, "server") || strings.Contains(raw, "500") || strings.Contains(raw, "502") {

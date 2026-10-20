@@ -248,7 +248,9 @@ let checkinState = {};
 function renderAccounts(list) {
   const tb = $('accBody');
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="11"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，粘贴一个小浣熊账号（access_token / refresh_token）</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="11"><div class="empty"><div class="big">账号池是空的</div>' +
+      '点击右上角「添加账号」：用<strong>微信扫码</strong>最省事（不用装客户端、也不用复制任何东西），' +
+      '也可以切到 refreshToken 页粘贴一条凭证</div></td></tr>';
     return;
   }
   tb.innerHTML = list.map(a => {
@@ -1686,15 +1688,67 @@ let addTab = 'browser';
 // switchAddTab 主按钮跟着 tab 走：一屏只有一个「加入」，避免两个并列主 CTA 抢焦点。
 function switchAddTab(tab) {
   document.querySelectorAll('#addTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  $('addTabQr').hidden = tab !== 'qr';
   $('addTabBrowser').hidden = tab !== 'browser';
   $('addTabToken').hidden = tab !== 'token';
   $('btnRefreshLogin').hidden = tab !== 'token';
+  if (tab === 'qr' && !qrStarted) startQrLogin();
+}
+
+// startQrLogin 开一次扫码会话：拿会话 id 与二维码，之后靠 poll 收号。
+// 二维码图走 /panel/api/login/qr.png（服务端画，不依赖 CDN，内网也能用）。
+let qrStarted = false;
+// pngToDataUrl 把二维码 PNG 转成 data URL（<img> 没法带鉴权头，见 startQrLogin）。
+async function pngToDataUrl(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let bin = '';
+  const CHUNK = 0x8000; // 分块拼，别用 apply 一次塞几万个参数（会爆栈）
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return 'data:image/png;base64,' + btoa(bin);
+}
+async function startQrLogin() {
+  qrStarted = true;
+  stopLoginPoll();
+  $('qrLoad').hidden = false;
+  $('qrReady').hidden = true;
+  setQrStatus('正在生成二维码', '');
+  try {
+    const d = await api('login/qr/start', { method: 'POST', body: '{}' });
+    loginID = d.id;
+    // <img src> 自己发的请求带不上 Authorization（面板接口要密钥），所以先带鉴权
+    // fetch 成字节再转 data URL 挂上去。不用 blob: —— 实测某些 Chromium 环境里
+    // <img src="blob:…"> 直接 onerror（同一份字节 createImageBitmap 却能解），
+    // data: 到处都行；二维码 ~1KB，转一次的开销可以忽略。
+    const kr = await fetch(d.png, {
+      headers: storedKey() ? { Authorization: 'Bearer ' + storedKey() } : {},
+    });
+    if (!kr.ok) throw new Error('二维码加载失败（HTTP ' + kr.status + '）');
+    $('qrImg').src = await pngToDataUrl(await kr.blob());
+    $('qrLoad').hidden = true;
+    $('qrReady').hidden = false;
+    setQrStatus('等待扫码', '');
+    pollFails = 0;
+    loginTimer = setInterval(pollLogin, 2500); // 与上游二维码状态机同节拍
+  } catch (e) {
+    $('qrLoad').hidden = true;
+    $('addErr').hidden = false;
+    $('addErr').textContent = e.message;
+  }
+}
+function setQrStatus(text, cls) {
+  const el = $('qrStatus');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'qrstatus' + (cls ? ' ' + cls : '');
 }
 
 function openAdd() {
   loginID = '';
   stopLoginPoll();
-  addTab = 'browser';
+  qrStarted = false;
+  addTab = 'qr'; // 扫码是首选：不依赖回调地址，手机扫也能完成
   switchAddTab(addTab);
   $('addLoad').hidden = false;
   $('addReady').hidden = true;
@@ -1783,7 +1837,11 @@ async function pollLogin() {
   try {
     const d = await api('login/poll?id=' + encodeURIComponent(loginID));
     pollFails = 0;
-    if (!d.done) return;
+    if (!d.done) {
+      // 扫码路径没有回调事件，界面靠这次轮询的附带信息说「已扫待确认」。
+      if (d.qr_status) setQrStatus(d.qr_status, d.qr_status === '已扫码，请在手机上确认' ? 'warn' : '');
+      return;
+    }
     stopLoginPoll();
     toast('已加入：' + (d.nickname || d.uid), 'ok');
     $('addVeil').classList.remove('on');
@@ -1853,8 +1911,14 @@ function boot() {
   document.querySelectorAll('#addVeil input[name="addRealm"]').forEach(r => {
     r.onchange = () => { addRealm = r.value; openAdd(); };
   });
-  $('btnAddClose').onclick = () => { stopLoginPoll(); loginID = ''; $('addVeil').classList.remove('on'); };
+  $('btnAddClose').onclick = () => {
+    stopLoginPoll();
+    loginID = '';
+    qrStarted = false;
+    $('addVeil').classList.remove('on');
+  };
   $('btnSubmitCallback').onclick = submitCallback;
+  $('btnQrRefresh').onclick = () => { qrStarted = false; startQrLogin(); };
   // 回车即提交，省一次点击（粘贴完习惯性敲回车）。
   $('addCallbackUrl').addEventListener('keydown', e => { if (e.key === 'Enter') submitCallback(); });
   $('btnCopyUrl').onclick = () => {

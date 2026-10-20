@@ -320,6 +320,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 }
 .savebar .grow { flex: 1; }
 .restart-note { color: var(--warn); font-size: 12.5px; }
+/* 扫码登录：二维码 + 右侧状态。图固定 220px，避免不同屏宽下弹窗抖动。 */
+.qrbox { display: flex; gap: 16px; align-items: flex-start; padding: 4px 0 10px; }
+.qrbox img { border-radius: 8px; background: #fff; padding: 6px; border: 1px solid var(--line); }
+.qrside { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.qrstatus { font-size: 13px; font-weight: 600; color: var(--ink-1); }
+.qrstatus.warn { color: var(--warn); }
+.qrstatus.bad { color: var(--bad); }
 
 /* ── 弹层 ─────────────────────────────────────────────────────────── */
 .veil { position: fixed; inset: 0; background: rgba(6,8,13,.62); backdrop-filter: blur(2px); display: none; z-index: 60; }
@@ -1135,7 +1142,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <header>
       <h3>添加账号</h3>
       <div class="tabs" id="addTabs">
-        <button class="tab on" data-tab="browser">浏览器登录</button>
+        <button class="tab on" data-tab="qr">微信扫码</button>
+        <button class="tab" data-tab="browser">浏览器登录</button>
         <button class="tab" data-tab="token">refreshToken</button>
       </div>
     </header>
@@ -1149,7 +1157,24 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <label class="realm-opt"><input type="radio" name="addRealm" value="intl">国际版</label>
       </div>
       -->
-      <div id="addTabBrowser" class="tab-panel">
+      <!-- 扫码是首选路径：二维码里编的是公开网页，微信扫完服务端轮询取票——
+           没有回调地址，所以面板放服务器/局域网、用手机扫码都能完成。 -->
+      <div id="addTabQr" class="tab-panel">
+        <div id="qrLoad" class="state"><span class="dots">正在生成二维码</span></div>
+        <div id="qrReady" hidden>
+          <div class="qrbox">
+            <img id="qrImg" alt="微信扫码登录二维码" width="220" height="220">
+            <div class="qrside">
+              <div class="qrstatus" id="qrStatus">等待扫码</div>
+              <div class="hint">用<strong>微信</strong>扫码，在手机上确认登录。<br>
+                二维码约 2 分钟有效，过期点「刷新二维码」。</div>
+              <button class="xs" id="btnQrRefresh">刷新二维码</button>
+            </div>
+          </div>
+          <div class="hint">扫码完成后账号会自动进来，不用复制任何东西——手机与面板不在同一网络也成立。</div>
+        </div>
+      </div>
+      <div id="addTabBrowser" class="tab-panel" hidden>
         <div id="addLoad" class="state"><span class="dots">正在获取授权链接</span></div>
         <div id="addReady" hidden>
           <div class="urlrow">

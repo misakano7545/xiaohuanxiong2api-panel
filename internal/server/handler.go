@@ -388,6 +388,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	body = setModelInBody(body, configName)
 	body = h.applyPrompt(body)
+	// 思考开关：`reasoning_effort` 在上游是空转参数（实测对 reasoning_tokens 无影响），
+	// 真正生效的是 extra_body.thinking。三条协议（chat/messages/responses）最后都汇到
+	// 这里，所以只在这一处翻译。
+	body = applyThinking(body)
 
 	tried := map[string]bool{}
 	var lastErr error

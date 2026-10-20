@@ -229,6 +229,59 @@ func TestLoopbackLoginFlow(t *testing.T) {
 	}
 }
 
+// 微信扫码登录：不需要任何回调地址（二维码里编的是公开网页，服务端轮询取票），
+// 所以面板放在服务器/局域网也行——这是替代 127.0.0.1 环回回调的首选路径。
+func TestQrLoginStart(t *testing.T) {
+	pn, _, _ := newTestPanel(t)
+	code, body := call(t, pn, http.MethodPost, "/panel/api/login/qr/start", `{}`)
+	if code != http.StatusOK {
+		t.Fatalf("qr/start status = %d body = %v", code, body)
+	}
+	qrCode := fmt.Sprint(body["code"])
+	if !regexp.MustCompile(`^[a-f0-9]{32}$`).MatchString(qrCode) {
+		t.Fatalf("扫码头应为 32 位小写 hex，得到 %q", qrCode)
+	}
+	content := fmt.Sprint(body["content"])
+	if !strings.Contains(content, "/login/mp?") || !strings.Contains(content, "code="+qrCode) {
+		t.Errorf("二维码内容不对: %s", content)
+	}
+	// 未扫码时 poll 必须说「没完成」，并带上阶段文案。
+	code, body = call(t, pn, http.MethodGet, "/panel/api/login/poll?id="+qrCode, "")
+	if code != http.StatusOK || body["done"] != false {
+		t.Fatalf("未扫码 poll = %d %v", code, body)
+	}
+	if fmt.Sprint(body["qr_status"]) == "" {
+		t.Errorf("poll 应带 qr_status 进度文案")
+	}
+}
+
+// 二维码由面板自己画成 PNG（不依赖 CDN/前端库），且不能缓存（code 一次性）。
+func TestQrLoginImage(t *testing.T) {
+	pn, _, _ := newTestPanel(t)
+	code, body := call(t, pn, http.MethodPost, "/panel/api/login/qr/start", `{}`)
+	pngPath := fmt.Sprint(body["png"])
+	if !strings.HasPrefix(pngPath, "/panel/api/login/qr.png?code=") {
+		t.Fatalf("png 路径不对: %s", pngPath)
+	}
+	req := httptest.NewRequest(http.MethodGet, pngPath, nil)
+	req.RemoteAddr = "127.0.0.1:51234" // 空密钥时面板只信本机（见 Panel.authorized）
+	rec := httptest.NewRecorder()
+	pn.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("qr.png status = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	if !strings.HasPrefix(rec.Header().Get("Cache-Control"), "no-store") {
+		t.Errorf("二维码不该被缓存：Cache-Control=%q", rec.Header().Get("Cache-Control"))
+	}
+	if sig := rec.Body.Bytes(); len(sig) < 8 || sig[0] != 0x89 || string(sig[1:4]) != "PNG" {
+		t.Errorf("不是合法 PNG（%d 字节）", rec.Body.Len())
+	}
+	_ = code
+}
+
 // 跨机/服务器部署：官方回调地址写死 127.0.0.1，浏览器到不了，靠粘贴链接回填。
 // 三条路径都要能用：命中会话（交回轮询）、没有会话（直接换票入池）、裸授权码。
 func TestLoginCodePaste(t *testing.T) {

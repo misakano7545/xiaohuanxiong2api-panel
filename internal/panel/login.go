@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	qrcode "github.com/skip2/go-qrcode"
+
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/upstream"
 )
@@ -25,11 +27,15 @@ const (
 
 var errLoginSession = errors.New("登录链接已失效，请回面板重新点「添加账号」")
 
-// loginSession 是一次设备授权流程（一个账号一个全新设备号）。
+// loginSession 是一次登录流程（一个账号一个全新设备号）。
+//
+// 两种形态：Qr != nil 时走微信扫码轮询（不需要任何回调地址，服务器/局域网部署都能用）；
+// 否则走 Qr == nil 的环回回调（浏览器登录后打 /auth/callback）。
 type loginSession struct {
 	Machine string
 	Realm   string
 	Login   *upstream.DeviceLogin
+	Qr      *upstream.QrLogin
 	At      time.Time
 	// Busy 上一次 poll 还没回来：前端 3s 一次比上游慢时会重叠，重叠会并发打同一个 nonce。
 	Busy bool
@@ -176,6 +182,58 @@ func (p *Panel) loginCode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "imported", "uid": uid, "nickname": nick})
 }
 
+// loginQrStart 开一次微信扫码登录：返回会话 id、二维码内容、二维码 PNG 地址。
+//
+// 比环回回调强的地方：二维码里编的是**公开网页**（{origin}/login/mp?code=…），
+// 微信扫完服务端把结果挂到我们自造的 code 上，面板轮询取票。所以面板放在服务器/
+// 局域网、甚至用户用手机扫码都能完成，不再受「官方页只认 127.0.0.1」的限制。
+func (p *Panel) loginQrStart(w http.ResponseWriter, r *http.Request) {
+	machine := newMachineID()
+	qr, err := upstream.NewQrLogin(p.cfg.Upstream, machine)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	p.loginMu.Lock()
+	if p.logins == nil {
+		p.logins = map[string]loginSession{}
+	}
+	for id, sess := range p.logins {
+		if time.Since(sess.At) > loginTTL {
+			delete(p.logins, id)
+		}
+	}
+	p.logins[qr.State()] = loginSession{Machine: machine, Realm: upstream.RegionCN, Qr: qr, At: time.Now()}
+	p.loginMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":      qr.State(),
+		"code":    qr.QRCode(),
+		"content": qr.QRContent(),
+		"png":     "/panel/api/login/qr.png?code=" + url.QueryEscape(qr.QRCode()),
+	})
+}
+
+// loginQrImage 把扫码链接渲染成 PNG（二维码由面板自己画，不依赖任何外部服务）。
+//
+// 为什么服务端画而不是前端画：前端要么引 CDN 库（面板要能离线/内网用），要么
+// 塞一份 QR 编码器进 app.js（几百行纠错码逻辑，维护成本高于收益）。
+func (p *Panel) loginQrImage(w http.ResponseWriter, r *http.Request) {
+	code := strings.TrimSpace(r.URL.Query().Get("code"))
+	if code == "" || len(code) > 64 {
+		writeErr(w, http.StatusBadRequest, "缺少 code")
+		return
+	}
+	content := p.cfg.Upstream.QrContent(code)
+	png, err := qrcode.Encode(content, qrcode.Medium, 320)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "二维码生成失败："+err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store") // code 一次性，缓存住会展示过期码
+	_, _ = w.Write(png)
+}
+
 // loginStart 生成设备授权链接：{id, url}。用户在自己浏览器里打开 url 完成授权。
 func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -252,14 +310,34 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		p.loginMu.Unlock()
 	}()
 
-	creds, done, err := sess.Login.Poll(r.Context())
+	var creds *auth.Auth
+	var done bool
+	var err error
+	if sess.Qr != nil {
+		creds, done, err = sess.Qr.Poll(r.Context())
+		if errors.Is(err, upstream.ErrQrCanceled) {
+			// 用户取消/二维码过期：这是终态，停掉前端轮询比一直转圈诚实。
+			p.loginMu.Lock()
+			delete(p.logins, id)
+			p.loginMu.Unlock()
+			writeErr(w, http.StatusGone, err.Error())
+			return
+		}
+	} else {
+		creds, done, err = sess.Login.Poll(r.Context())
+	}
 	if err != nil {
 		// 5xx/超时交给前端继续重试：授权可能已在浏览器侧完成，停掉就永远不入池。
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	if !done {
-		writeJSON(w, http.StatusOK, map[string]any{"done": false})
+		out := map[string]any{"done": false}
+		if sess.Qr != nil {
+			// 扫码没有回调事件：把上游状态（等待扫码 / 已扫码待确认）当进度显示。
+			out["qr_status"] = sess.Qr.LastStatus()
+		}
+		writeJSON(w, http.StatusOK, out)
 		return
 	}
 	uid, nick, err := p.saveAccount(creds)
