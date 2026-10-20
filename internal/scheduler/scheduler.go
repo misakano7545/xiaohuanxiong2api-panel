@@ -358,9 +358,11 @@ func (s *Scheduler) byUrgency() []string {
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
-		if a == nil || a.RefreshTokenValue() == "" {
+		if a == nil {
 			continue
 		}
+		// 签到只依赖 access_token（v1.1.0 凭证可能没有 refresh_token——CheckinUID
+		// 已放开前置否决，这里同步别再按票筛掉，否则自动签到永远排不进该号）。
 		// 所有号都要进签到队列：小浣熊的每日积分发放对所有账号一致（
 		// CheckinUID 会按「上游未开」如实跳过，而不是这里直接不排队）。
 		expire := int64(0)
@@ -409,9 +411,13 @@ func (s *Scheduler) CheckinUID(uid string) (CheckinResult, error) {
 		return res, ErrDisabled
 	}
 	a := s.cfg.Pool.AuthByUID(uid)
-	if a == nil || a.RefreshTokenValue() == "" {
-		return res, fmt.Errorf("no refresh token")
+	if a == nil {
+		return res, ErrNotFound
 	}
+	// 没有 refresh_token 不再一票否决：v1.1.0 的 box-agent 凭证只有 access_token
+	// （实测 auth.json 不再落 refresh），签到/查询本身用 access_token 就够。
+	// 预刷新逻辑自己会跳过未到期票；真到期又无票时，RefreshTokenIfNeeded 报错、
+	// 后面 status 调用如实暴露「请重新登录」，不在这里提前拦。
 	// 每日发放是服务端 00:00 自动入账（bills 流水实锤），CheckinStatus 以流水里
 	// 当天有无 daily_grant 为准；enable=false 只在「上游把该账号额度关了」时出现。
 	// 签到前把 access token 换新的：9 点签到离上一次保活（凌晨 3 点）有段距离，拿一张
