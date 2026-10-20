@@ -392,8 +392,8 @@ function switchLabel(cfg) {
    条件之间是 AND；每个条件为空即不参与判定。 */
 let mdAll = [];
 let mdFilter = { q: '', realm: '', fn: '', sort: 'default' };
-// 通道（function）展示名：solo_work_lite = Work、solo_coder = Coder。
-const FN_LABEL = { solo_work_lite: 'Work', solo_coder: 'Coder' };
+// 通道（function）展示名：小浣熊只有 raccoon 一个上游。
+const FN_LABEL = { raccoon: 'Raccoon' };
 function fnLabel(fn) { return FN_LABEL[fn] || fn || '—'; }
 // mdSearchText 参与关键字搜索的字段（ID / 展示名 / 能力）。
 function mdSearchText(m) {
