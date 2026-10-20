@@ -68,8 +68,11 @@ func (f *fakeRaccoon) handler() http.Handler {
 		_, _ = io.WriteString(w, `{"code":0,"data":{"available_points":120,"daily_points":30,
 			"monthly_points":50,"reward_points":10,"topup_points":30}}`)
 	})
-	mux.HandleFunc("/api/web/office/v3/setting_info", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"code":0,"data":{}}`)
+	mux.HandleFunc("/api/web/desktop/v1/login/points/grant", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"code":0,"data":{"granted":false,"popup":null}}`)
+	})
+	mux.HandleFunc("/bills", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"code":0,"data":{"items":[]}}`)
 	})
 	mux.HandleFunc("/refresh", func(w http.ResponseWriter, r *http.Request) {
 		f.refreshCalls++
@@ -211,7 +214,7 @@ func TestNoAccount(t *testing.T) {
 	h := NewHandler(Config{Pool: pool.New(""), Upstream: client, MaxRotate: 1,
 		DefaultModel: upstream.DefaultConfigName})
 	rec := post(t, h, "/v1/chat/completions",
-		`{"model":"raccoon-chat-ml-5-5","messages":[{"role":"user","content":"hi"}]}`)
+		`{"model":"`+upstream.DefaultConfigName+`","messages":[{"role":"user","content":"hi"}]}`)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d", rec.Code)
 	}

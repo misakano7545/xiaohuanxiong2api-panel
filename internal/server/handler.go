@@ -212,6 +212,21 @@ func (h *Handler) mapModel(model, realm string) (string, error) {
 	}
 	mi, ok := h.cfg.Upstream.ResolveModel(model, realm)
 	if !ok {
+		// 目录未加载（进程刚起、还没人刷过）时补拉一次再重试：否则配置里的默认模型
+		// 只存在于上游目录，冷启动第一条请求会被静态兜底表误判 unknown model。
+		// RefreshModels 自带 10 分钟 TTL，拉过就只是一次内存判断。
+		if a := h.cfg.Pool.Peek(); a != nil {
+			if _, err := h.cfg.Upstream.RefreshModels(a, false); err == nil {
+				mi, ok = h.cfg.Upstream.ResolveModel(model, realm)
+			}
+		}
+	}
+	if !ok {
+		// 目录查不到再走别名表（Claude Code / Cursor 写死的 gpt-4o、claude-* 等）。
+		// 别名目标（raccoon-chat-ml-5-5）可能不在目录里但上游实测接受，所以直接放行。
+		if alias, ok2 := aliasModel(realm, model); ok2 {
+			return alias, nil
+		}
 		return "", fmt.Errorf("unknown model %q", model)
 	}
 	return mi.ID, nil

@@ -412,9 +412,8 @@ func (s *Scheduler) CheckinUID(uid string) (CheckinResult, error) {
 	if a == nil || a.RefreshTokenValue() == "" {
 		return res, fmt.Errorf("no refresh token")
 	}
-	// 小浣熊的签到就是一次 setting_info 调用（幂等），
-	// 拿不到时上游返回空列表，CheckinStatus 会如实给出 enable=false，由下面的分支按
-	// 「上游未开」跳过——不再按地区硬跳过。
+	// 每日发放是服务端 00:00 自动入账（bills 流水实锤），CheckinStatus 以流水里
+	// 当天有无 daily_grant 为准；enable=false 只在「上游把该账号额度关了」时出现。
 	// 签到前把 access token 换新的：9 点签到离上一次保活（凌晨 3 点）有段距离，拿一张
 	// 已过期的票只会白跑一轮（照 wild-work：2h 内到期就先刷）。刷失败不在这里报错——真有
 	// 问题会让下面的 status 调用如实暴露，那条错误信息比「刷新失败」更贴题。

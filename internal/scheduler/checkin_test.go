@@ -25,9 +25,18 @@ func TestCheckinFlow(t *testing.T) {
 				remain = 300
 			}
 			_, _ = io.WriteString(w, `{"code":0,"data":{"available_points":`+fmt.Sprint(remain)+`}}`)
-		case "/api/web/office/v3/setting_info":
+		case "/bills":
+			// 复核口径：流水里今天已有 daily_grant 才算「签到成功」。
+			if claimed {
+				today := time.Now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")
+				_, _ = io.WriteString(w, `{"code":0,"data":{"items":[{"biz_type":"daily_grant",`+
+					`"points":300,"grant_at":"`+today+`T00:00:00+08:00"}]}}`)
+			} else {
+				_, _ = io.WriteString(w, `{"code":0,"data":{"items":[]}}`)
+			}
+		case "/api/web/desktop/v1/login/points/grant":
 			claimed = true
-			_, _ = io.WriteString(w, `{"code":0,"data":{}}`)
+			_, _ = io.WriteString(w, `{"code":0,"data":{"granted":true,"popup":null}}`)
 		default:
 			http.NotFound(w, r)
 		}

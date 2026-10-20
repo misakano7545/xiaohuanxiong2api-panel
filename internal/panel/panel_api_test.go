@@ -25,10 +25,19 @@ func newTestPanel(t *testing.T) (*Panel, *upstream.Client, *pool.Pool) {
 				{"name":"raccoon-chat-ml-5-5","display_name":"Raccoon Chat","tags":["thinking"],
 				 "context_window":"180000","max_tokens":80000,"billing_multiplier":1,"visible":true}]}]}}`)
 		case "/balance":
-			_, _ = io.WriteString(w, `{"code":0,"data":{"available_points":120,"daily_points":30,
+			_, _ = io.WriteString(w, `{"code":0,"data":{"available_points":120,"daily_points":0,
 				"monthly_points":50,"reward_points":10,"topup_points":30}}`)
-		case "/api/web/office/v3/setting_info":
-			_, _ = io.WriteString(w, `{"code":0,"data":{}}`)
+		case "/bills":
+			_, _ = io.WriteString(w, `{"code":0,"data":{"items":[]}}`)
+		case "/api/web/desktop/v1/login/points/grant":
+			_, _ = io.WriteString(w, `{"code":0,"data":{"granted":false,"popup":null}}`)
+		case "/user_info":
+			// 按令牌回身份：access-1 是 TestImportPAT 导入号的票，别的按 u-1。
+			if r.Header.Get("Authorization") == "Bearer access-1" {
+				_, _ = io.WriteString(w, `{"code":0,"data":{"id":"u-2","name":"导入号"}}`)
+			} else {
+				_, _ = io.WriteString(w, `{"code":0,"data":{"id":"u-1","name":"测试号"}}`)
+			}
 		case "/refresh":
 			_, _ = io.WriteString(w, `{"code":0,"data":{"access_token":"fresh","refresh_token":"fresh-r","user_id":"u-1"}}`)
 		case "/login_with_authorization_code":

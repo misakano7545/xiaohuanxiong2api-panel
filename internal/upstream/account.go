@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
 )
@@ -127,32 +128,77 @@ func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, er
 	return packs, usage.Remain, usage.Expire, err
 }
 
-// CheckinStatus 查签到状态。上游没有独立的状态接口，口径是「本地签到日 + 余额」：
-// 今天已经领过 → checked=true；没领过但余额 > 0 也说明账号可用（enable=true）。
+// 每日积分按服务端 00:00（东八区）自动发放、午夜自动清零：bills 流水里
+// 有当天的 daily_grant 即为「今日已到账」。不存在可触发的签到开关，面板的
+// 「签到」只是登录领取检查 + 以流水为准的状态确认。
+var shanghaiTZ = func() *time.Location {
+	if loc, err := time.LoadLocation("Asia/Shanghai"); err == nil {
+		return loc
+	}
+	return time.FixedZone("CST", 8*3600)
+}()
+
+// CheckinStatus 查「今日每日发放是否已到账」：口径是 bills 流水里今天有没有
+// daily_grant；流水查不到时退回余额的 daily_points>0。credits=可用积分，
+// enable=账号可用（余额 0 且今日无发放说明额度耗尽，交由调度器判断）。
 func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, enable bool, err error) {
 	usage, err := c.UserEntUsageDetail(a)
 	if err != nil {
 		return false, 0, false, err
 	}
-	return a.CheckedInToday(), usage.Remain, true, nil
+	credits = usage.Remain
+	if granted, berr := c.dailyGrantToday(a); berr == nil {
+		checkedIn = granted
+	} else {
+		checkedIn = usage.Daily > 0
+	}
+	if checkedIn {
+		a.MarkCheckedIn()
+	}
+	return checkedIn, credits, true, nil
 }
 
-// CheckinClaim 触发当日积分发放（上游幂等）。
+// dailyGrantToday 读 bills 流水：今天（东八区）是否已有 daily_grant 入账。
+func (c *Client) dailyGrantToday(a *auth.Auth) (bool, error) {
+	resp, err := c.doJSON(http.MethodGet,
+		c.pointsBase()+PointsBillsPath+"?"+PointsBillsQuery, nil, c.authHeader(a))
+	if err != nil {
+		return false, err
+	}
+	data, err := payloadOf(resp, "积分流水")
+	if err != nil {
+		return false, err
+	}
+	today := time.Now().In(shanghaiTZ).Format("2006-01-02")
+	items, _ := data["items"].([]any)
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		if item == nil || text(item, "biz_type") != "daily_grant" {
+			continue
+		}
+		grantAt := text(item, "grant_at", "created_at")
+		if len(grantAt) >= 10 && grantAt[:10] == today {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// CheckinClaim 走登录领取接口（上游幂等：今日已发放则 granted=false）。
+// 只有 granted=true 才记本地台账——发放本体是服务端 00:00 做的，这里只是兜住
+// 登录弹窗式的手动领取路径。
 func (c *Client) CheckinClaim(a *auth.Auth) error {
-	resp, err := c.doJSON(http.MethodGet, c.originBase()+DailyGrantPath, nil, map[string]string{
-		"Accept":             "application/json",
-		"X-Client-Platform":  "desktop-windows",
-		"X-Client-Version":   "v1.0.0",
-		"X-Raccoon-Language": "zh",
-		"Authorization":      "Bearer " + a.JWT(),
-	})
+	resp, err := c.doJSON(http.MethodPost, c.desktopBase()+PointsGrantPath, map[string]any{}, c.authHeader(a))
 	if err != nil {
 		return err
 	}
-	if _, err := payloadOf(resp, "每日积分发放"); err != nil {
+	data, err := payloadOf(resp, "登录领取积分")
+	if err != nil {
 		return err
 	}
-	a.MarkCheckedIn()
+	if granted, _ := data["granted"].(bool); granted {
+		a.MarkCheckedIn()
+	}
 	return nil
 }
 
@@ -217,7 +263,7 @@ func (c *Client) PrepareAccount(_ context.Context, payload map[string]any, _ str
 // exchangeCode 用一次性授权码换凭证。
 func (c *Client) exchangeCode(code string) (*auth.Auth, error) {
 	resp, err := c.doJSON(http.MethodPost, c.authBase()+LoginCodePath,
-		map[string]string{"authorization_code": code}, nil)
+		map[string]string{"authorization_code": code}, clientIDHeaders())
 	if err != nil {
 		return nil, err
 	}
@@ -313,10 +359,25 @@ func (c *Client) AuthorizeURL(appName string) string {
 }
 
 func (c *Client) authHeader(a *auth.Auth) map[string]string {
+	h := clientIDHeaders()
 	if a == nil {
-		return map[string]string{"Accept": "application/json"}
+		h["Accept"] = "application/json"
+		return h
 	}
-	return map[string]string{"Accept": "application/json", "Authorization": "Bearer " + a.JWT()}
+	h["Accept"] = "application/json"
+	h["Authorization"] = "Bearer " + a.JWT()
+	return h
+}
+
+// clientIDHeaders 复刻 v1.1.0 桌面客户端的识别头（抓包实测）：上游网关按
+// 客户端渠道做风控，缺了这些头虽能过，但带上最贴近真实流量。
+func clientIDHeaders() map[string]string {
+	return map[string]string{
+		"x-client-name":      "@raccoon/office-desktop",
+		"x-client-platform":  "desktop-windows-x64",
+		"x-client-version":   "v1.1.0",
+		"x-client-channel":   "official",
+	}
 }
 
 func stripBearerToken(v string) string {

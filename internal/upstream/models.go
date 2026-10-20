@@ -81,6 +81,9 @@ func (c *Client) RefreshModels(a *auth.Auth, force bool) ([]ModelInfo, error) {
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.JWT())
+	for key, value := range clientIDHeaders() {
+		req.Header.Set(key, value)
+	}
 	resp, err := c.do(req)
 	if err != nil {
 		return c.Catalog(), err

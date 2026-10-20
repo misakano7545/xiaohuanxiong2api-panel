@@ -29,8 +29,16 @@ const (
 	RefreshPath     = "/refresh"
 	LoginCodePath   = "/login_with_authorization_code"
 	BalancePath     = "/balance"
-	DailyGrantPath  = "/api/web/office/v3/setting_info"
+	UserInfoPath    = "/user_info"
 	EntitlementPath = "/entitlement_info"
+	// 每日 300 分是服务端 00:00 自动发放、午夜自动清零（bills 流水实锤），
+	// 不存在「调 setting_info 触发发放」这种客户端侧开关——旧 DailyGrantPath
+	// 是对抓包的误读。登录领取动作是 desktop 域的 grant（幂等，领过了回
+	// granted:false），流水查询是 points 域的 bills。
+	DesktopBase      = Origin + "/api/web/desktop/v1"
+	PointsGrantPath  = "/login/points/grant"
+	PointsBillsPath  = "/bills"
+	PointsBillsQuery = "paging.limit=10&type=all&paging.offset=0"
 
 	// RegionGlobal / RegionCN 保留基线的地区常量：小浣熊只有一个站，
 	// 名字留着是为了不让 pool/panel/server 的既有分支全部改口。
@@ -38,7 +46,9 @@ const (
 	RegionCN     = "cn"
 
 	// DefaultConfigName 是上游默认对话模型（目录里拿不到时用它兜底）。
-	DefaultConfigName     = "raccoon-chat-ml-5-5"
+	// v1.1.0 抓包确认：model_catalog 的 default_model = raccoon-8c4485
+	// （raccoon-chat-ml-5-5 不在目录里，但上游实测仍接受，保留作别名目标）。
+	DefaultConfigName     = "raccoon-8c4485"
 	DefaultConfigNameIntl = DefaultConfigName
 )
 
@@ -282,6 +292,12 @@ func (c *Client) originBase() string {
 	return c.origin
 }
 
+// desktopBase 桌面端专属域（登录领取积分等）：挂在主站 origin 下，
+// 与积分/鉴权域同生共死，config 覆盖主站时一起跟着走。
+func (c *Client) desktopBase() string {
+	return c.originBase() + "/api/web/desktop/v1"
+}
+
 func orDefault(value, fallback string) string {
 	if value == "" {
 		return fallback
@@ -490,7 +506,7 @@ func applyRefreshedUID(a *auth.Auth, uid string) {
 // refreshOnce 真的打一次续期接口并返回新票（不写回账号）。
 func (c *Client) refreshOnce(a *auth.Auth) (token, refresh string, exp int64, uid string, err error) {
 	resp, err := c.doJSON(http.MethodPost, c.authBase()+RefreshPath,
-		map[string]string{"refresh_token": a.RefreshTokenValue()}, nil)
+		map[string]string{"refresh_token": a.RefreshTokenValue()}, clientIDHeaders())
 	if err != nil {
 		return "", "", 0, "", err
 	}
@@ -523,9 +539,22 @@ func (c *Client) refreshOnce(a *auth.Auth) (token, refresh string, exp int64, ui
 // ---------------------------------------------------------------------------
 // 用户资料
 
-// GetUserInfo 用 JWT 补齐 uid/昵称：小浣熊没有独立的 userinfo 接口，
-// access token 的 claims 就是唯一来源（续期响应里也带 user_id）。
+// GetUserInfo 用上游 GET {auth_base}/user_info 补齐 uid/昵称（抓包实测存在，
+// 200 返回 {data:{id,name,...}}）；接口不可用时退回 JWT claims，保证不比以前差。
 func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, err error) {
+	if token := a.JWT(); token != "" {
+		if resp, uerr := c.doJSON(http.MethodGet, c.authBase()+UserInfoPath, nil,
+			map[string]string{"Accept": "application/json", "Authorization": "Bearer " + token}); uerr == nil {
+			if data, perr := payloadOf(resp, "用户资料"); perr == nil {
+				uid = text(data, "id", "user_id", "uid")
+				nickname = text(data, "name", "nickname")
+				enterpriseID = text(data, "office_org_name", "org_code")
+				if uid != "" {
+					return uid, nickname, enterpriseID, nil
+				}
+			}
+		}
+	}
 	token := a.JWT()
 	uid = auth.JWTUserID(token)
 	nickname = a.Nickname
@@ -555,6 +584,9 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Accept-Encoding", "identity")
+	for key, value := range clientIDHeaders() {
+		req.Header.Set(key, value)
+	}
 	req.Header.Set("User-Agent", c.currentUA())
 	if token := a.JWT(); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
