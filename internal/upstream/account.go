@@ -1,7 +1,8 @@
 // account.go 账号侧口径：额度/积分、每日签到、凭证准备（含授权码换票）。
 //
-// 小浣熊只有一套账号体系：GET {points_base}/balance 给积分，GET
-// {origin}/api/web/office/v3/setting_info 触发当日积分发放（幂等，重复调用安全）。
+// 小浣熊只有一套账号体系：GET {points_base}/balance 给积分（available_points
+// 及各来源分类），每日发放由服务端 00:00 自动入账（bills 流水可查），
+// GET {points_base}/bills 给逐笔发放/到期流水。
 package upstream
 
 import (
@@ -49,11 +50,17 @@ type entUsagePack struct {
 	Balance int64  `json:"balance"`
 }
 
-// CreditPackage 是面板额度页的打包形状。
+// CreditPackage 是面板额度页的打包形状。字段是前端 app.js 的契约
+// （pkBySource/pkAccountSegments 读 remain/size/expire），别再退回只有 credits 的窄版——
+// 那会让构成页把每个桶都判成「已用完」（remain undefined → 0）。
 type CreditPackage struct {
-	Name    string `json:"name"`
-	Credits int64  `json:"credits"`
-	Unit    string `json:"unit"`
+	Group  string `json:"group,omitempty"`
+	Name   string `json:"name"`
+	Unit   string `json:"unit"`
+	Remain int64  `json:"remain"`
+	Size   int64  `json:"size"`
+	// Expire 是批次到期（unix 秒）；0 = 上游没给到期信息，前端如实不画到期分布。
+	Expire int64 `json:"expire,omitempty"`
 }
 
 // FetchQuota 返回原始额度节点（面板排障用）。
@@ -96,30 +103,83 @@ func (c *Client) UserEntUsage(a *auth.Auth) (remain, total, expire int64, err er
 }
 
 // BalancePackages 返回面板额度页需要的钱包明细。
+//
+// 上游没有「资源包」概念，构成页口径 = balance 的四个来源分类（每日/每月会员/
+// 奖励/充值），每桶 remain=size（余额本身没有"面额"概念，两者一致就是诚实口径）。
+// 「可用积分」不单独成包——它就是四桶之和，再进列表会把构成条撑爆、和桶重复计数。
+// 每日桶的到期取自 bills 里**最近未过期**的 daily_grant 批次（上游现在批次是发放
+// 后 7 天滚动过期，不是午夜清零）；流水取不到就不猜，expire 留空。
+// 全 0 的桶不输出：否则前端把每个空桶归进「已用完（面额合计 0）」，纯噪音。
 func (c *Client) BalancePackages(a *auth.Auth) ([]CreditPackage, EntUsage, error) {
 	usage, err := c.UserEntUsageDetail(a)
 	if err != nil {
 		return nil, EntUsage{}, err
 	}
+	dailyExpire := c.dailyBatchExpiry(a)
 	wallet := []struct {
-		name  string
-		value int64
+		name   string
+		value  int64
+		expire int64
 	}{
-		{"可用积分", usage.Remain},
-		{"每日积分", usage.Daily},
-		{"每月会员积分", usage.Monthly},
-		{"奖励积分", usage.Reward},
-		{"充值积分", usage.Topup},
+		{"每日积分", usage.Daily, dailyExpire},
+		{"每月会员积分", usage.Monthly, 0},
+		{"奖励积分", usage.Reward, 0},
+		{"充值积分", usage.Topup, 0},
 	}
 	packs := make([]CreditPackage, 0, len(wallet))
 	for _, w := range wallet {
-		if w.value < 0 {
+		if w.value <= 0 {
 			continue
 		}
-		packs = append(packs, CreditPackage{Name: w.name, Credits: w.value, Unit: UnitCredit})
+		packs = append(packs, CreditPackage{
+			Name: w.name, Unit: UnitCredit, Remain: w.value, Size: w.value, Expire: w.expire,
+		})
 	}
 	a.SetCredit(usage.Remain)
 	return packs, usage, nil
+}
+
+// dailyBatchExpiry 查 bills，取每日发放批次里最早的**未过期**到期时刻（unix 秒）。
+// 失败静默返回 0（构成页照常显示余额，只是到期分布缺这一列——不拿流水故障拖累额度页）。
+func (c *Client) dailyBatchExpiry(a *auth.Auth) int64 {
+	resp, err := c.doJSON(http.MethodGet,
+		c.pointsBase()+PointsBillsPath+"?"+PointsBillsQuery, nil, c.authHeader(a))
+	if err != nil {
+		return 0
+	}
+	data, err := payloadOf(resp, "积分流水")
+	if err != nil {
+		return 0
+	}
+	now := time.Now()
+	var earliest int64
+	items, _ := data["items"].([]any)
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		if item == nil || text(item, "biz_type") != "daily_grant" {
+			continue
+		}
+		exp := parseRFC3339(text(item, "expire_at"))
+		if exp <= 0 || time.Unix(exp, 0).Before(now) {
+			continue
+		}
+		if earliest == 0 || exp < earliest {
+			earliest = exp
+		}
+	}
+	return earliest
+}
+
+// parseRFC3339 把上游时间戳（2006-01-02T15:04:05+08:00）转 unix 秒；解析不了返回 0。
+func parseRFC3339(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return 0
+	}
+	return t.Unix()
 }
 
 // CreditPackages 是 BalancePackages 的老签名（credits, total, expire）。
@@ -263,7 +323,7 @@ func (c *Client) PrepareAccount(_ context.Context, payload map[string]any, _ str
 // exchangeCode 用一次性授权码换凭证。
 func (c *Client) exchangeCode(code string) (*auth.Auth, error) {
 	resp, err := c.doJSON(http.MethodPost, c.authBase()+LoginCodePath,
-		map[string]string{"authorization_code": code}, clientIDHeaders())
+		map[string]string{"authorization_code": code}, c.clientIDHeaders())
 	if err != nil {
 		return nil, err
 	}
@@ -359,7 +419,7 @@ func (c *Client) AuthorizeURL(appName string) string {
 }
 
 func (c *Client) authHeader(a *auth.Auth) map[string]string {
-	h := clientIDHeaders()
+	h := c.clientIDHeaders()
 	if a == nil {
 		h["Accept"] = "application/json"
 		return h
@@ -371,12 +431,14 @@ func (c *Client) authHeader(a *auth.Auth) map[string]string {
 
 // clientIDHeaders 复刻 v1.1.0 桌面客户端的识别头（抓包实测）：上游网关按
 // 客户端渠道做风控，缺了这些头虽能过，但带上最贴近真实流量。
-func clientIDHeaders() map[string]string {
+// x-client-version 可被 config.upstream.client_version 覆盖（官方升版本号时用）。
+func (c *Client) clientIDHeaders() map[string]string {
+	version := c.currentVersion()
 	return map[string]string{
-		"x-client-name":      "@raccoon/office-desktop",
-		"x-client-platform":  "desktop-windows-x64",
-		"x-client-version":   "v1.1.0",
-		"x-client-channel":   "official",
+		"x-client-name":     "@raccoon/office-desktop",
+		"x-client-platform": "desktop-windows-x64",
+		"x-client-version":  version,
+		"x-client-channel":  "official",
 	}
 }
 

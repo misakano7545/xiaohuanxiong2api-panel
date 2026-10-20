@@ -908,18 +908,21 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <input name="idle_timeout_seconds" type="number" min="1" placeholder="300">
                 <span class="hint">上游既不吐数据也不断连时掐掉</span></label>
               <label class="fld"><span class="lb">User-Agent 覆盖</span>
-                <input name="user_agent" placeholder="（留空用 qoder-local-proxy）"></label>
+                <input name="user_agent" placeholder="（留空用 xhx2api-panel）"></label>
               <label class="fld"><span class="lb">客户端版本覆盖</span>
-                <input name="client_version" placeholder="（留空用内置）">
-                <span class="hint">面板展示的客户端身份</span></label>
+                <input name="client_version" placeholder="（留空用 v1.1.0）">
+                <span class="hint">出站 x-client-version 指纹头；官方升版本后改这里即可</span></label>
             </div>
             <div class="grid3">
-              <label class="fld"><span class="lb">国际版网关基址</span>
-                <input name="gateway_host" placeholder="https://api3.qoder.sh/">
-                <span class="hint">留空用内置；国际账号的推理与模型目录走它</span></label>
-              <label class="fld"><span class="lb">国内版网关基址</span>
-                <input name="gateway_host_cn" placeholder="https://gateway.qoder.com.cn/">
-                <span class="hint">留空用内置</span></label>
+              <label class="fld"><span class="lb">推理网关基址</span>
+                <input name="llm_base" placeholder="https://xiaohuanxiong.com/api/web/llm/v2">
+                <span class="hint">留空用内置；对话与模型目录走它</span></label>
+              <label class="fld"><span class="lb">鉴权基址</span>
+                <input name="auth_base" placeholder="https://xiaohuanxiong.com/api/web/auth/v1">
+                <span class="hint">留空用内置；登录/刷新/user_info 走它</span></label>
+              <label class="fld"><span class="lb">积分基址</span>
+                <input name="points_base" placeholder="https://xiaohuanxiong.com/api/web/points/v1">
+                <span class="hint">留空用内置；余额/流水走它</span></label>
             </div>
 
           </div>

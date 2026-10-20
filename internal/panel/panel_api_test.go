@@ -129,8 +129,14 @@ func TestPackages(t *testing.T) {
 	if len(packs) == 0 {
 		t.Fatalf("积分构成为空")
 	}
-	if packs[0].(map[string]any)["name"] != "可用积分" {
-		t.Errorf("包名 = %v", packs[0].(map[string]any)["name"])
+	// 口径：来源分类（每日/每月/奖励/充值）各自成包，全 0 桶不输出；
+	// 前端契约字段是 remain/size，不是 credits。
+	p0 := packs[0].(map[string]any)
+	if p0["name"] != "每月会员积分" {
+		t.Errorf("包名 = %v", p0["name"])
+	}
+	if p0["remain"].(float64) != 50 || p0["size"].(float64) != 50 {
+		t.Errorf("包 remain/size = %v/%v", p0["remain"], p0["size"])
 	}
 }
 

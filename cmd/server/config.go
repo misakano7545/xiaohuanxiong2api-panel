@@ -64,7 +64,7 @@ type Config struct {
 		IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
 		// UserAgent 出站 UA 覆盖；空 = 内置 xhx2api-panel。
 		UserAgent string `json:"user_agent"`
-		// ClientVersion 小浣熊没有客户端版本段（保留键只为兼容旧配置文件）。
+		// ClientVersion 覆盖出站 x-client-version 指纹头（空 = 内置 v1.1.0，抓包实测）。
 		ClientVersion string `json:"client_version"`
 		// LLMBase / AuthBase 是小浣熊的推理网关与鉴权基址（热生效），留空回落内置常量。
 		LLMBase  string `json:"llm_base"`

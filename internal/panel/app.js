@@ -1177,8 +1177,9 @@ const CFG_MAP = {
   header_timeout_seconds: ['upstream', 'header_timeout_seconds'],
   idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'],
   user_agent: ['upstream', 'user_agent'], client_version: ['upstream', 'client_version'],
-  // 上游基址（留空 = 内置：推理 xiaohuanxiong.com/api/web/llm/v2 / 鉴权 …/auth/v1）
-  gateway_host: ['upstream', 'gateway_host'], gateway_host_cn: ['upstream', 'gateway_host_cn'],
+  // 上游基址（留空 = 内置：推理 xiaohuanxiong.com/api/web/llm/v2 / 鉴权 …/auth/v1 / 积分 …/points/v1）
+  llm_base: ['upstream', 'llm_base'], auth_base: ['upstream', 'auth_base'],
+  points_base: ['upstream', 'points_base'], origin: ['upstream', 'origin'],
 };
 // ARRAY_FIELDS 逗号分隔提交成 JSON 数组（后端是 []int）；BOOL_FIELDS 用 select 的
 // "true"/"false" 提交成 JSON 布尔——直接把字符串塞进 json 会让后端 Unmarshal 失败。

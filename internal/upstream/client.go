@@ -52,6 +52,10 @@ const (
 	// （raccoon-chat-ml-5-5 不在目录里，但上游实测仍接受，保留作别名目标）。
 	DefaultConfigName     = "raccoon-8c4485"
 	DefaultConfigNameIntl = DefaultConfigName
+
+	// DefaultClientVersion 是出站 x-client-version 头的内置值（v1.1.0 抓包实测）；
+	// 官方升版本后可用 config.upstream.client_version 覆盖，不必重编译。
+	DefaultClientVersion = "v1.1.0"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -183,8 +187,9 @@ type Client struct {
 	points string
 	origin string
 
-	uaMu      sync.RWMutex
-	userAgent string
+	uaMu          sync.RWMutex
+	userAgent     string
+	clientVersion string
 
 	catMu   sync.RWMutex
 	catalog []ModelInfo
@@ -233,14 +238,29 @@ func (c *Client) SetTimeouts(short, header, idle time.Duration) {
 	c.idleTimeout = idle
 }
 
-// SetIdentity 覆盖出站 User-Agent（空 = 用内置 UA）。
-func (c *Client) SetIdentity(userAgent, _ string) {
+// SetIdentity 覆盖出站 User-Agent 与客户端版本头（空 = 用内置默认）。
+func (c *Client) SetIdentity(userAgent, clientVersion string) {
 	c.uaMu.Lock()
 	c.userAgent = strings.TrimSpace(userAgent)
+	v := strings.TrimSpace(clientVersion)
+	if v != "" && !strings.HasPrefix(v, "v") {
+		v = "v" + v // 配置里写 1.1.0 和写 v1.1.0 都行，头里统一带 v（照客户端实测）
+	}
+	c.clientVersion = v
 	c.uaMu.Unlock()
 }
 
-// SetAgentHosts 覆盖推理网关与鉴权基址（config.upstream.gateway_host / gateway_host_cn）。
+// currentVersion 返回 x-client-version 头取值：配置覆盖优先，否则内置抓包实测值。
+func (c *Client) currentVersion() string {
+	c.uaMu.RLock()
+	defer c.uaMu.RUnlock()
+	if c.clientVersion != "" {
+		return c.clientVersion
+	}
+	return DefaultClientVersion
+}
+
+// SetAgentHosts 覆盖推理网关与鉴权基址（config.upstream.llm_base / auth_base）。
 func (c *Client) SetAgentHosts(llm, authBase string) {
 	c.hostMu.Lock()
 	c.llm = orDefault(strings.TrimRight(strings.TrimSpace(llm), "/"), LLMBase)
@@ -508,7 +528,7 @@ func applyRefreshedUID(a *auth.Auth, uid string) {
 // refreshOnce 真的打一次续期接口并返回新票（不写回账号）。
 func (c *Client) refreshOnce(a *auth.Auth) (token, refresh string, exp int64, uid string, err error) {
 	resp, err := c.doJSON(http.MethodPost, c.authBase()+RefreshPath,
-		map[string]string{"refresh_token": a.RefreshTokenValue()}, clientIDHeaders())
+		map[string]string{"refresh_token": a.RefreshTokenValue()}, c.clientIDHeaders())
 	if err != nil {
 		return "", "", 0, "", err
 	}
@@ -586,7 +606,7 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (io.ReadCloser, int, []by
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Accept-Encoding", "identity")
-	for key, value := range clientIDHeaders() {
+	for key, value := range c.clientIDHeaders() {
 		req.Header.Set(key, value)
 	}
 	req.Header.Set("User-Agent", c.currentUA())
