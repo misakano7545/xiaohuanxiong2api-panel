@@ -1,4 +1,40 @@
-# xiaohuanxiong2api-panel
+<p align="center">
+  <h1>Xhx2API Panel</h1>
+</p>
+
+<p align="center">
+  <b>把商汤「小浣熊」登录态包成 OpenAI / Anthropic 兼容 API 的多账号网关 · 附 Web 管理面板</b><br>
+  三协议入站 · 多账号轮转 · 自动续期 · 账号池轮转 · 单二进制 · 内嵌面板
+</p>
+
+<p align="center">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.22-00ADD8?logo=go&logoColor=white&style=flat-square">
+  <img alt="API" src="https://img.shields.io/badge/API-OpenAI%20%7C%20Anthropic-412991?style=flat-square">
+  <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Single_Binary%20%7C%20Docker-2496ED?style=flat-square">
+  <img alt="License" src="https://img.shields.io/badge/License-MIT-green?style=flat-square">
+</p>
+
+---
+
+> 本项目与商汤科技无任何关系，**非官方、未获授权**，仅个人自用；仓库不含任何账号、token 或密钥。
+
+> [!IMPORTANT]
+> **本仓是 [workbuddy2api-panel](https://github.com/misakano7545/workbuddy2api-panel) 的严格派生**（同一作者），只把上游适配层换成小浣熊；基线仓仍在维护，但**不保证能力随时同步**。
+>
+> **维护方式披露**：本仓的 issue / PR 处置、代码审查、测试与修复实现由 **Ekko Studio + Hermes Agent**（AI 编码 agent）辅助完成，合并与发布决策由维护者本人作出。作者是学生，因家庭经济困难，周末需兼职，业余还有摄影、公交等自己的兴趣——**本项目兴趣驱动，更新随缘，不代表作者有全部精力投入维护**，也可能出现较长时间没有提交，请勿当作有 SLA 的商业项目。
+>
+> 风险自评：**上游随时可能收紧导致通道不可用**；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
+
+> [!WARNING]
+> **郑重提醒**——这段话针对两类人：**现实中与作者同校的使用者**，以及**拿本项目搭建对外中转站、做批量小号 / 售卖额度等恶意滥用的人**。
+>
+> 作者无法追踪、也不会去追踪任何人的行为，不对任何人行使监控。但必须把话说清楚：上述用法**严重违背上游项目作者与维护者的初衷**，也是消耗本仓作者维护动力的最大来源——本项目免费、开源、由一名学生用课余时间维护，不是给任何人拿去转卖的资源。
+>
+> 如果哪一天这个项目**确确实实让作者心力憔悴、不再有动力维护，本仓也会停止维护**，且不另行通知。上游的今天，可能就是本仓的明天，请自重。
+>
+> 同样的底线也适用于**同校使用者**：若有人出于一己私利，或以作者无法理解、也不知情的行为，把本项目的情况反映到**学校信息中心**、作者所在的**二级学院**，乃至**学院院长与校方其他上级领导**，藉此换取奖学金等个人好处，**本仓也会同时停止维护**。这不是赌气——接受核查、说明与后续处理所占用的时间与心力，已经超出本仓能承受的维护成本。
+
+## 项目简介
 
 把商汤「小浣熊」（`xiaohuanxiong.com`）的 Web/桌面客户端登录态，包成**本地 OpenAI 兼容网关**，
 同时提供 **Anthropic Messages** 与 **OpenAI Responses** 两个入口，让 Claude Code / Codex 这类
@@ -13,8 +49,6 @@
 - **OpenAI Codex / 新版 Agent** → `POST /v1/responses`
 - **Claude Code / Anthropic SDK** → `POST /v1/messages`（同时挂 `/messages`、`/v1/messages/count_tokens`）
 
-> 本项目与商汤科技无任何关系，非官方、未获授权。请遵守上游服务条款，仅个人自用。
-> 仓库不含任何账号、token 或密钥。
 
 ## 小浣熊上游是什么形状
 
@@ -85,7 +119,7 @@ Docker：`docker compose up -d --build`（`auths/`、`data/`、`config.json` 都
 | `pool.*` | 见示例 | 在途上限、熔断/降权阈值、闲置补偿 |
 | `schedule.checkin_hours` / `keepalive_hours` | `[9]` / `[3]` | 签到与保活时点 |
 
-## 接到客户端
+## 接入客户端
 
 **Claude Code**
 
@@ -109,6 +143,13 @@ wire_api = "responses"
 
 **任何 OpenAI SDK**：`base_url=http://127.0.0.1:7867/v1`。
 
+## 安全与合规
+
+- **非官方、未获授权**：本文与上游服务商无任何关系，仅用于**本人授权账号**在本机 / 私有环境下的协议互操作。
+- **凭证**：`auths/*.json` 以 0600 明文保存，目录不得进入备份、同步盘或共享范围；仓库不含任何账号、token 或密钥。
+- **鉴权**：`api_key`（或 `api_keys`）为空时 `/v1/*` 与 `/panel/api/*` 不鉴权，仅适合 `127.0.0.1` 或可信内网；公网部署必须设密钥并前置 HTTPS 反代与访问限流。
+- **合规边界**：不得用于搭建对外中转站、共享他人账号、批量注册小号或售卖额度；作者不承担使用后果。
+
 ## 行为与边界
 
 - **模型名**：`/v1/models` 来自上游目录（`visible:false` 不展示），目录拉不到时用内置兜底表；
@@ -128,6 +169,13 @@ go test ./...          # internal/server 用 httptest 假上游覆盖三协议 �
 go test -race ./...
 ```
 
+## 血统与致谢
+
+本仓是 [workbuddy2api-panel](https://github.com/misakano7545/workbuddy2api-panel) 的严格派生（同一作者），只把上游适配层换成小浣熊；基线仓仍在维护，但不保证能力随时同步。
+
+- 面板形态与目录结构沿用基线，问题在本仓处理，不向上游基线仓报。
+- 感谢 [workbuddy2api-panel](https://github.com/misakano7545/workbuddy2api-panel) 的作者把同族骨架开源。
+
 ## License
 
-MIT，见 [LICENSE](LICENSE)。基线来自 workbuddy2api-panel（同一作者）。
+MIT，见 [LICENSE](LICENSE)。
