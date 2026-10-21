@@ -31,13 +31,15 @@ const (
 
 // EntUsage 是额度快照（面板/调度器共用）。
 type EntUsage struct {
-	Remain  int64 `json:"remain"`
-	Total   int64 `json:"total"`
-	Expire  int64 `json:"expire,omitempty"`
-	Daily   int64 `json:"daily,omitempty"`
-	Monthly int64 `json:"monthly,omitempty"`
-	Reward  int64 `json:"reward,omitempty"`
-	Topup   int64 `json:"topup,omitempty"`
+	Remain int64 `json:"remain"`
+	Total  int64 `json:"total"`
+	Expire int64 `json:"expire,omitempty"`
+	// ExpirePoints 上面那个时刻会作废的积分额（只算每日批次，不含不会过期的奖励/充值）。
+	ExpirePoints int64 `json:"expire_points,omitempty"`
+	Daily        int64 `json:"daily,omitempty"`
+	Monthly      int64 `json:"monthly,omitempty"`
+	Reward       int64 `json:"reward,omitempty"`
+	Topup        int64 `json:"topup,omitempty"`
 	// 面板/池子要的三件美元口径字段：小浣熊只有积分，恒 0 / 空。
 	Unit     string  `json:"unit,omitempty"`
 	UsedUSD  float64 `json:"used_usd,omitempty"`
@@ -174,6 +176,69 @@ func (c *Client) dailyBatchExpiry(a *auth.Auth) int64 {
 		}
 	}
 	return earliest
+}
+
+// UserEntUsageDetailWithExpiry 在余额之外补上「最早会作废的那批积分」的到期时刻（unix 秒）。
+//
+// 面板上「到期」这一列与「积分到期提醒」卡片吃的就是它。为什么要专门算：
+// 上游的 /points/v1/balance **完全不返回到期时间**（只有 available/daily/monthly/
+// reward/topup 这些余额桶），所以模型里的 EntUsage.Expire 永远是 0，那两处 UI 就一直是空的。
+// 真正带到期语义的只有积分流水：每笔 daily_grant 都有自己的 expire_at，上游按「失效时刻
+// 先后」扣减（FEFO），所以「最近会作废的那批」= 所有未过期批次里最早的那个 expire_at。
+//
+// 实测口径（2026-10-21，账号 4465567）：早期批次是当天 23:59:59 过期，10 月下旬起改成
+// 发放后 6~7 天滚动过期（10-21 发 → 10-27 23:59:59），所以这一列的天数会明显大于「今天」。
+func (c *Client) UserEntUsageDetailWithExpiry(a *auth.Auth) (EntUsage, error) {
+	usage, err := c.UserEntUsageDetail(a)
+	if err != nil {
+		return usage, err
+	}
+	// 只有这里补到期：UserEntUsageDetail 保持「一次余额请求」的廉价口径，
+	// 签到前的紧迫度探询、面板刷新等调用点自己决定要不要多花一次流水请求。
+	expire, points := c.earliestBatchExpiry(a)
+	usage.Expire, usage.ExpirePoints = expire, points
+	return usage, nil
+}
+
+// earliestBatchExpiry 返回「最早过期的那批每日积分」的到期时刻与它的积分额。
+//
+// 只报时刻是不够的：账号余额里往往混着不会过期的奖励/充值积分，面板若拿可用总额去算
+// 「哪天会作废多少」，会得出「6490 分 5 天后全没」这种吓人的假数（实际只有每日批次那
+// 几百分会作废）。所以按 expire_at 分组，取最早那组的积分合计。
+func (c *Client) earliestBatchExpiry(a *auth.Auth) (expire, points int64) {
+	resp, err := c.doJSON(http.MethodGet,
+		c.pointsBase()+PointsBillsPath+"?"+PointsBillsQuery, nil, c.authHeader(a))
+	if err != nil {
+		return 0, 0
+	}
+	data, err := payloadOf(resp, "积分流水")
+	if err != nil {
+		return 0, 0
+	}
+	now := time.Now()
+	byExpire := map[int64]int64{}
+	items, _ := data["items"].([]any)
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		if item == nil || text(item, "biz_type") != "daily_grant" {
+			continue
+		}
+		exp := parseRFC3339(text(item, "expire_at"))
+		if exp <= 0 || time.Unix(exp, 0).Before(now) {
+			continue
+		}
+		pts := mustInt(item["points"])
+		if pts <= 0 {
+			continue
+		}
+		byExpire[exp] += pts
+	}
+	for exp, pts := range byExpire {
+		if expire == 0 || exp < expire {
+			expire, points = exp, pts
+		}
+	}
+	return expire, points
 }
 
 // parseRFC3339 把上游时间戳（2006-01-02T15:04:05+08:00）转 unix 秒；解析不了返回 0。

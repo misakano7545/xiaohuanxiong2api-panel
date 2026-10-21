@@ -364,7 +364,9 @@ func (s *Scheduler) runBalanceLoop(ctx context.Context) {
 // （2026-10-15 实测 is_dollar_usage_billing=true、basic_usage_limit=1、basic_usage_amount=0.00059），
 // 老接口把国际号的额度一律读成 0，面板就显示成「无额度」——那不是上游的真实状态。
 func (s *Scheduler) entUsageOf(uid string, a *auth.Auth) (upstream.EntUsage, error) {
-	u, err := s.cfg.Upstream.UserEntUsageDetail(a)
+	// 用带到期的口径：面板「到期」列与「积分到期提醒」都读 pool 里的 expire，
+	// 而余额接口本身不返回到期时间（见 upstream.UserEntUsageDetailWithExpiry 的说明）。
+	u, err := s.cfg.Upstream.UserEntUsageDetailWithExpiry(a)
 	if err != nil {
 		return u, err
 	}
@@ -372,6 +374,7 @@ func (s *Scheduler) entUsageOf(uid string, a *auth.Auth) (upstream.EntUsage, err
 		Unit: u.Unit, Remain: u.Remain, Total: u.Total,
 		UsedUSD: u.UsedUSD, LimitUSD: u.LimitUSD,
 	}, u.Expire)
+	s.cfg.Pool.SetExpireCredits(uid, u.ExpirePoints)
 	return u, nil
 }
 

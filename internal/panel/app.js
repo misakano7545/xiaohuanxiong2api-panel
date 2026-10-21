@@ -309,24 +309,27 @@ function renderExpiry(list) {
     if (isUSD(a)) continue;
     const remain = Number(a.credits || 0);
     const exp = Number(a.expire || 0);
+    // 「该日到期」只算会作废的那批（每日发放批次），不能用可用总额——奖励/充值积分
+    // 不会过期，混进来会得出「全都要没了」的假数。expire_credits 缺失才退回总额。
+    const expiring = Number(a.expire_credits || 0) || remain;
     if (!exp || remain <= 0) continue;
     // 四舍五入到「天」：向上取整会把 5 小时后到期的说成明天（和日期列矛盾），
     // 纯向下又会把「整 3 天」说成 2 天；按最近的整天报最接近用户直觉。
     const days = Math.max(0, Math.round((exp * 1000 - Date.now()) / 86400000));
-    rows.push({ uid: a.uid, remain, exp, days });
+    rows.push({ uid: a.uid, remain, exp, days, expiring: Math.min(expiring, remain) });
   }
   rows.sort((x, y) => x.exp - y.exp);
   const tb = $('expBody');
   if (!tb) return;
   tb.innerHTML = !rows.length
-    ? '<tr><td colspan="5"><div class="empty">暂无到期信息（上游没给 expire，或余额已为 0）</div></td></tr>'
+    ? '<tr><td colspan="5"><div class="empty">暂无到期信息（积分流水里没有未过期的每日发放批次，或余额已为 0）</div></td></tr>'
     : rows.map(r => '<tr><td class="who"><div class="nm">' + esc(r.uid) + '</div></td>' +
         '<td>' + new Date(r.exp * 1000).toLocaleDateString('zh-CN') + '</td>' +
         '<td class="num">' + (r.days === 0 ? '今天' : r.days === 1 ? '明天' : r.days + ' 天') + '</td>' +
-        '<td class="num">' + fmtNum(r.remain) + '</td>' +
-        '<td class="num">' + fmtNum(Math.ceil(r.remain / Math.max(1, r.days))) + '</td></tr>').join('');
+        '<td class="num">' + fmtNum(r.expiring) + '</td>' +
+        '<td class="num">' + fmtNum(Math.ceil(r.expiring / Math.max(1, r.days))) + '</td></tr>').join('');
   if ($('expNote')) {
-    const total = rows.reduce((s, r) => s + r.remain, 0);
+    const total = rows.reduce((s, r) => s + r.expiring, 0);
     $('expNote').textContent = rows.length ? rows.length + ' 个账号 · 合计 ' + fmtNum(total) : '—';
   }
 }

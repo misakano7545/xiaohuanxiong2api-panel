@@ -64,7 +64,6 @@ type Panel struct {
 
 	loginMu sync.Mutex
 	logins  map[string]loginSession
-
 }
 
 // New 构建面板。Logs 为空时自建一个环，但 main 应传入和标准日志共用的那个。
@@ -798,7 +797,9 @@ func (p *Panel) refreshBalance(uid string) error {
 	}
 	// 口径感知：国内写积分、国际写美元。老接口 UserEntUsage 对国际号恒返回 0，
 	// 面板就会显示成「无额度」——实测国际 Free plan 有 $1 额度、已用 $0.00059。
-	u, err := p.cfg.Upstream.UserEntUsageDetail(a)
+	// 用带到期的口径：面板「到期」列与「积分到期提醒」卡片都读 pool 里的 expire，
+	// 而余额接口本身不返回到期时间（见 upstream.UserEntUsageDetailWithExpiry）。
+	u, err := p.cfg.Upstream.UserEntUsageDetailWithExpiry(a)
 	if err != nil {
 		return err
 	}
@@ -806,6 +807,7 @@ func (p *Panel) refreshBalance(uid string) error {
 		Unit: u.Unit, Remain: u.Remain, Total: u.Total,
 		UsedUSD: u.UsedUSD, LimitUSD: u.LimitUSD,
 	}, u.Expire)
+	p.cfg.Pool.SetExpireCredits(uid, u.ExpirePoints)
 	return nil
 }
 

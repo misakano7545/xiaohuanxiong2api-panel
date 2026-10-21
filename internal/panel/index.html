@@ -711,7 +711,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="tbl-wrap">
         <table class="acc">
           <thead><tr>
-            <th>账号</th><th>最近到期</th><th class="num">距到期</th>
+            <th>账号</th><th title="该账号最早会作废的那批积分的到期时刻（取自积分流水的每日发放批次）">最近批次到期</th><th class="num">距到期</th>
             <th class="num">该日到期</th><th class="num">日均需耗</th>
           </tr></thead>
           <tbody id="expBody"></tbody>
@@ -737,7 +737,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <table class="acc">
           <thead><tr>
             <th class="mark" aria-hidden="true"></th>
-            <th>账号</th><th>状态</th><th>额度</th><th>到期</th><th>Token</th><th>错误</th><th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
+            <th>账号</th><th>状态</th><th>额度</th><th title="最早会作废的那批积分的到期时刻（积分流水里的每日发放批次）；上游余额接口不返回到期，空的=流水里查不到未过期批次">到期</th><th>Token</th><th>错误</th><th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
           </tr></thead>
           <tbody id="accBody"></tbody>
         </table>
