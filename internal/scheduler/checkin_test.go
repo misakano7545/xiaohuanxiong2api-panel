@@ -89,6 +89,55 @@ func TestCheckinFlow(t *testing.T) {
 	}
 }
 
+// TestCheckinSkipsAccountWithoutDailyGrant 上游从没给这个号发过每日积分（真实例：
+// 7692045 注册 4 天，流水里只有 reward_grant，daily_points 恒 0）：claim 没意义、
+// 复核必然 false，但这不是签到失败——不能每轮刷假失败、更不能记冷却。
+func TestCheckinSkipsAccountWithoutDailyGrant(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/balance":
+			_, _ = io.WriteString(w, `{"code":0,"data":{"available_points":5968,"daily_points":0,"reward_points":5968}}`)
+		case "/bills":
+			// 只有注册礼包与桌面端登录奖励，一条 daily_grant 都没有。
+			_, _ = io.WriteString(w, `{"code":0,"data":{"items":[
+				{"biz_type":"reward_grant","points":3000,"created_at":"2026-10-21T15:22:15+08:00"},
+				{"biz_type":"reward_grant","points":3000,"created_at":"2026-10-17T23:23:02+08:00"}]}}`)
+		case "/user_info":
+			// 注册于 4 天前：不是「当天新号」，pending 那条兜底不适用。
+			_, _ = io.WriteString(w, `{"code":0,"data":{"id":"u-7","name":"老号但没日发","created_at":"2026-10-17T23:23:02+08:00"}}`)
+		case "/api/web/desktop/v1/login/points/grant":
+			_, _ = io.WriteString(w, `{"code":0,"data":{"granted":false,"popup":null}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	up := upstream.New()
+	up.SetAPIHosts(srv.URL, srv.URL)
+	up.SetAgentHosts(srv.URL, srv.URL)
+	p := pool.New("")
+	p.Add(&auth.Auth{Data: auth.Data{
+		AccessToken: "dt-old", ExpiresAt: time.Now().Add(48 * time.Hour).UnixMilli(),
+		MachineID: "m-7", UID: "u-7",
+	}})
+	s := New(Config{Pool: p, Upstream: up, CheckinEnabled: true, KeepaliveEnabled: true})
+
+	res, err := s.CheckinUID("u-7")
+	if err != nil {
+		t.Fatalf("未开通每日积分不该报错: %v（status=%q reason=%q）", err, res.Status, res.Reason)
+	}
+	if res.Status != "skipped" {
+		t.Fatalf("状态 = %q，期望 skipped（reason=%q）", res.Status, res.Reason)
+	}
+	if !strings.Contains(res.Reason, "daily_grant") {
+		t.Errorf("skipped 原因没说明白：%q", res.Reason)
+	}
+	if p.CheckinCooling("u-7") {
+		t.Error("未开通每日积分不该记签到冷却")
+	}
+}
+
 // TestCheckinPendingForNewAccount 当天新注册的号：上游 00:00 那批每日积分还没发，
 // bills 里没有 daily_grant。此时 claim 会拿到「登录奖励」，但复核必然是 false——
 // 这不能记成签到失败（否则每分钟重试、还给它记签到冷却）。

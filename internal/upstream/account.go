@@ -354,8 +354,8 @@ func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, ena
 		return false, 0, false, err
 	}
 	credits = usage.Remain
-	if granted, berr := c.dailyGrantToday(a); berr == nil {
-		checkedIn = granted
+	if today, _, berr := c.DailyGrant(a); berr == nil {
+		checkedIn = today
 	} else {
 		checkedIn = usage.Daily > 0
 	}
@@ -365,30 +365,37 @@ func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, ena
 	return checkedIn, credits, true, nil
 }
 
-// dailyGrantToday 读 bills 流水：今天（东八区）是否已有 daily_grant 入账。
-func (c *Client) dailyGrantToday(a *auth.Auth) (bool, error) {
+// DailyGrant 读 bills 流水：今天（东八区）是否已有 daily_grant 入账，以及这个号
+// **历史上有没有过** daily_grant。
+//
+// 后一半是给「上游压根没给这个号开每日积分」用的：实测 2026-10-21，号 7692045
+// 注册 4 天、bills 里只有 reward_grant（注册礼包/桌面端登录奖励），daily_points 恒为 0，
+// 与它的 code_identity 为空一致。这种号 claim 再多轮也不会有 daily_grant，
+// 报「签到复核未通过」是谎报失败。
+func (c *Client) DailyGrant(a *auth.Auth) (today, ever bool, err error) {
 	resp, err := c.doJSON(http.MethodGet,
 		c.pointsBase()+PointsBillsPath+"?"+PointsBillsQuery, nil, c.authHeader(a))
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	data, err := payloadOf(resp, "积分流水")
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	today := time.Now().In(shanghaiTZ).Format("2006-01-02")
+	day := time.Now().In(shanghaiTZ).Format("2006-01-02")
 	items, _ := data["items"].([]any)
 	for _, raw := range items {
 		item, _ := raw.(map[string]any)
 		if item == nil || text(item, "biz_type") != "daily_grant" {
 			continue
 		}
+		ever = true
 		grantAt := text(item, "grant_at", "created_at")
-		if len(grantAt) >= 10 && grantAt[:10] == today {
-			return true, nil
+		if len(grantAt) >= 10 && grantAt[:10] == day {
+			today = true
 		}
 	}
-	return false, nil
+	return today, ever, nil
 }
 
 // CheckinClaim 走登录领取接口（上游幂等：今日已发放则 granted=false）。

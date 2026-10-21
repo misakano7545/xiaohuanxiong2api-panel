@@ -323,6 +323,36 @@ func setModelInBody(body []byte, modelID string) []byte {
 	return raw
 }
 
+// minOutputTokens 是出站 max_tokens 的下限：reasoning token 也算在 max_tokens 里，
+// 客户端给 32/64 这种小额度时思考会把预算吃光、正文回空且 finish_reason=length
+// （2026-10-21 实测 20 个模型里 10 个这样），看着像「模型坏了」。
+// 只能统一抬，不能按目录的 reasoning 标记分档——sensenova / glm-5-3-flash 标 false 照样烧。
+// shortcut: 非思考模型也会被多给额度，要按模型分档再收紧。
+const minOutputTokens = 512
+
+// liftMaxTokens 把过小的输出额度抬到 minOutputTokens（三种协议的字段名都认）。
+func liftMaxTokens(body []byte) []byte {
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	changed := false
+	for _, k := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+		if v, ok := obj[k].(float64); ok && v > 0 && v < minOutputTokens {
+			obj[k] = minOutputTokens
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return raw
+}
+
 // chatRequest 是入站体的窥探结构（只取路由需要的字段，其余由上游客户端自己解析）。
 type chatRequest struct {
 	Stream bool   `json:"stream"`
@@ -392,6 +422,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 真正生效的是 extra_body.thinking。三条协议（chat/messages/responses）最后都汇到
 	// 这里，所以只在这一处翻译。
 	body = applyThinking(body)
+	// 思考 token 算在 max_tokens 里，小额度会让正文回空——统一给个下限。
+	body = liftMaxTokens(body)
 
 	tried := map[string]bool{}
 	var lastErr error
