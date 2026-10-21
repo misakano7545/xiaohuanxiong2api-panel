@@ -409,6 +409,29 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 	return nil
 }
 
+// ClaimMobileGrant 领手机端首登奖励（一次性新手福利的另一笔，与桌面端额度独立）。
+//
+// 端点与桌面端同名不同域（/api/web/mobile/v1），身份头换成官方安卓 App 那两个；
+// token 与桌面端是同一把 Bearer——JWT claims 里没有平台字段（实测确认）。
+//
+// granted=false 表示该号在手机端已领过：同样是「已结算」，调用方不必再问。
+func (c *Client) ClaimMobileGrant(a *auth.Auth) (bool, error) {
+	h := c.authHeader(a)
+	// APK 逆向：平台值是 Capacitor getPlatform() 加 app- 前缀，版本头带 v。
+	h["x-client-platform"] = "app-android"
+	h["x-client-version"] = "v1.0.3"
+	resp, err := c.doJSON(http.MethodPost, c.originBase()+"/api/web/mobile/v1"+MobileGrantPath, map[string]any{}, h)
+	if err != nil {
+		return false, err
+	}
+	data, err := payloadOf(resp, "手机端首登奖励")
+	if err != nil {
+		return false, err
+	}
+	granted, _ := data["granted"].(bool)
+	return granted, nil
+}
+
 // PrepareAccount 把面板粘贴的内容变成账号：授权回调链接换票，或直接是凭证 JSON。
 //
 // payload 来自面板的导入端点：

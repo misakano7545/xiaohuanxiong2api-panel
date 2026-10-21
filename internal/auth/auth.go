@@ -45,6 +45,10 @@ type Auth struct {
 	Data
 	mu       sync.RWMutex
 	FilePath string `json:"-"`
+	// mobileGranted 手机端首登奖励是否已结算。**进程内记忆、不落盘**：上游对同一
+	// 账号幂等（领过回 granted:false），重启后多打一次只是白读一次；为它改账号文件
+	// 格式不值得。
+	mobileGranted bool
 }
 
 // Data 是可序列化字段（不含锁与路径，避免拷锁）。
@@ -163,6 +167,20 @@ func (a *Auth) CheckedInToday() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.CheckedIn == time.Now().Format("2006-01-02")
+}
+
+// MobileGrantDone 手机端首登奖励是否已结算（见 Auth.mobileGranted 的口径）。
+func (a *Auth) MobileGrantDone() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.mobileGranted
+}
+
+// MarkMobileGrantDone 记一次手机端首登奖励已结算（无论 granted 真假）。
+func (a *Auth) MarkMobileGrantDone() {
+	a.mu.Lock()
+	a.mobileGranted = true
+	a.mu.Unlock()
 }
 
 // FileNameFor 给出账号文件的规范名。

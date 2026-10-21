@@ -660,11 +660,37 @@ func checkinCooldown(err error) (time.Duration, bool) {
 // 业务失败与 HTTP 错误不会因重试而改变，重试只会成倍增加上游请求、触发风控。
 func (s *Scheduler) claimWithRetry(a *auth.Auth) error {
 	err := s.cfg.Upstream.CheckinClaim(a)
-	if err == nil || !isNetworkError(err) {
+	if err == nil {
+		s.claimMobileGrant(a)
+		return nil
+	}
+	if !isNetworkError(err) {
 		return err
 	}
 	time.Sleep(time.Second)
-	return s.cfg.Upstream.CheckinClaim(a)
+	if err := s.cfg.Upstream.CheckinClaim(a); err != nil {
+		return err
+	}
+	s.claimMobileGrant(a)
+	return nil
+}
+
+// claimMobileGrant 顺手领手机端首登奖励：一次性福利，与桌面端那笔额度独立。
+//
+// 失败只记日志：一笔一次性奖励不该让整轮签到判失败（它跟每日积分无关）。
+// 结算状态只在进程内记（见 auth.Auth.mobileGranted），重启后多打一次上游，
+// 幂等接口回 granted:false 即可。
+func (s *Scheduler) claimMobileGrant(a *auth.Auth) {
+	if a.MobileGrantDone() {
+		return
+	}
+	granted, err := s.cfg.Upstream.ClaimMobileGrant(a)
+	if err != nil {
+		log.Printf("mobile-grant %s: %v", a.UID, err)
+		return
+	}
+	a.MarkMobileGrantDone()
+	log.Printf("mobile-grant %s: granted=%v", a.UID, granted)
 }
 
 // isNetworkError 判断是否传输层失败：http.Client 会把传输错误包成 *url.Error，

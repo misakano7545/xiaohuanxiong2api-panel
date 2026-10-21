@@ -17,6 +17,7 @@ import (
 // TestCheckinFlow 跑一次真实签到链路：status（CLAIMABLE）→ claim → 复核（CLAIMED）。
 func TestCheckinFlow(t *testing.T) {
 	claimed := false
+	mobileCalls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/balance":
@@ -37,6 +38,13 @@ func TestCheckinFlow(t *testing.T) {
 			}
 		case "/api/web/desktop/v1/login/points/grant":
 			claimed = true
+			_, _ = io.WriteString(w, `{"code":0,"data":{"granted":true,"popup":null}}`)
+		case "/api/web/mobile/v1/login/points/grant":
+			mobileCalls++
+			// 手机端只认 App 身份头；桌面那套带 client-name 的头说明走错了端点口径。
+			if got := r.Header.Get("x-client-platform"); got != "app-android" {
+				t.Errorf("手机端首登奖励的 x-client-platform = %q，期望 app-android", got)
+			}
 			_, _ = io.WriteString(w, `{"code":0,"data":{"granted":true,"popup":null}}`)
 		default:
 			http.NotFound(w, r)
@@ -63,6 +71,9 @@ func TestCheckinFlow(t *testing.T) {
 	}
 	if !claimed {
 		t.Errorf("没有真的调用领取接口")
+	}
+	if mobileCalls != 1 {
+		t.Errorf("手机端首登奖励调用 %d 次，期望 1 次", mobileCalls)
 	}
 	if st, ok := p.Status("u-1"); !ok || st.Credits != 300 {
 		t.Errorf("签到后余额未回写: %+v", st)

@@ -37,6 +37,9 @@ const (
 	// granted:false），流水查询是 points 域的 bills。
 	DesktopBase     = Origin + "/api/web/desktop/v1"
 	PointsGrantPath = "/login/points/grant"
+	// 手机端首登奖励是**另一条端点、另一笔额度**：桌面端早已领过的号，手机端照样能
+	// 拿满（实测确认）。所以一次性福利要两条都领，只在账号页展示桌面端那笔会漏钱。
+	MobileGrantPath = "/login/points/grant"
 	PointsBillsPath = "/bills"
 	// limit 必须给足：流水按时间倒序，重度使用一天几十条 -N 消费记录会把
 	// 今日 +300 的 daily_grant 挤出前 10 条，签到状态就会误判 false。
