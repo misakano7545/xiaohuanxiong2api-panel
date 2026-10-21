@@ -321,6 +321,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .savebar .grow { flex: 1; }
 .restart-note { color: var(--warn); font-size: 12.5px; }
 /* 扫码登录：二维码 + 右侧状态。图固定 220px，避免不同屏宽下弹窗抖动。 */
+.smsrow { display: flex; align-items: center; gap: 10px; padding: 2px 0 12px; }
+.smsrow .hint { margin: 0; }
+.smsrow .hint.ok { color: var(--ok); }
+.smsrow .hint.err { color: var(--bad); }
 .qrbox { display: flex; gap: 16px; align-items: flex-start; padding: 4px 0 10px; }
 .qrbox img { border-radius: 8px; background: #fff; padding: 6px; border: 1px solid var(--line); }
 .qrside { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -1143,7 +1147,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <h3>添加账号</h3>
       <div class="tabs" id="addTabs">
         <button class="tab on" data-tab="qr">微信扫码</button>
-        <button class="tab" data-tab="browser">浏览器登录</button>
+        <button class="tab" data-tab="sms">短信登录</button>
+        <button class="tab" data-tab="browser">授权页登录</button>
         <button class="tab" data-tab="token">refreshToken</button>
       </div>
     </header>
@@ -1172,6 +1177,23 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             </div>
           </div>
           <div class="hint">扫码完成后账号会自动进来，不用复制任何东西——手机与面板不在同一网络也成立。</div>
+        </div>
+      </div>
+      <!-- 短信登录：上游强制「阿里云滑块」才给发码（缺 captcha_param 直接回 100006）。
+           实测滑块在第三方页面上 init 成功但一个节点都不渲染（popup/embed/独立页/补齐
+           AliyunCaptchaConfig 四种都试过）——阿里云场景只授权给官方域名，我们拿不到校验参数。
+           所以这里不假装能用：如实说明，并把用户引到能走通的路径。后端能力保留着
+           （upstream/smslogin.go 已验证到「加密被接受、卡在人机校验」这一步），
+           将来若拿到场景授权，只需恢复这个表单。 -->
+      <div id="addTabSms" class="tab-panel" hidden>
+        <div class="hint" style="padding:2px 0 10px">
+          <strong>这条路径目前走不通：</strong>上游发验证码前强制过一次阿里云滑块，
+          而该滑块只对商汤自己的域名授权——第三方页面（本面板）初始化能成功，
+          却渲染不出可拖动的控件，因此拿不到上游要的校验参数（实测返回 100006）。
+        </div>
+        <div class="hint" style="padding:0 0 12px">
+          <strong>替代方案：</strong>① 用「微信扫码」，不需要验证码也不需要客户端；
+          ② 在官网登录后，用「refreshToken」页粘贴一条凭证。
         </div>
       </div>
       <div id="addTabBrowser" class="tab-panel" hidden>
