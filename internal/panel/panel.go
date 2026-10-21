@@ -65,8 +65,6 @@ type Panel struct {
 	loginMu sync.Mutex
 	logins  map[string]loginSession
 
-	// sms 短信下发频控（见 sms.go）：自架面板不能被人当短信轰炸器用。
-	sms smsGuard
 }
 
 // New 构建面板。Logs 为空时自建一个环，但 main 应传入和标准日志共用的那个。
@@ -100,12 +98,6 @@ func New(cfg Config) *Panel {
 	// 微信扫码登录：不需要回调地址，服务器/局域网部署也能用（见 qrlogin.go）。
 	p.mux.HandleFunc("POST /panel/api/login/qr/start", p.withAuth(p.loginQrStart))
 	p.mux.HandleFunc("GET /panel/api/login/qr.png", p.withAuth(p.loginQrImage))
-	// 短信登录的人机校验辅助页（独立文档 + 自己的 CSP，见 smscaptcha.go）。
-	// 不带 Bearer：这是 window.open 打开的页面，且它不含任何面板数据、不调面板接口。
-	p.mux.HandleFunc("GET /panel/sms-captcha", p.smsCaptchaPage)
-	// 短信验证码登录（需要过一次阿里云滑块，见 sms.go）。
-	p.mux.HandleFunc("POST /panel/api/login/sms/send", p.withAuth(p.smsSend))
-	p.mux.HandleFunc("POST /panel/api/login/sms/verify", p.withAuth(p.smsVerify))
 	// 粘贴回调链接（跨机/服务器部署时 127.0.0.1 回调到不了，走这条）。
 	p.mux.HandleFunc("POST /panel/api/login/code", p.withAuth(p.loginCode))
 	// refreshToken 直登：不经过浏览器把号加进来（对方只给了一条 refresh_token 时的备用入口）。

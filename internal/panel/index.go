@@ -25,10 +25,7 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", csp)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
-	// 阿里云滑块要按来源判定场景域名：no-referrer 会让它拿不到来源、校验直接失败
-	// （实测表现为脚本内部 "network error" + 滑块 iframe 永远 display:none）。
-	// strict-origin-when-cross-origin 只把「协议+主机+端口」发给跨域目标，不带路径。
-	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 }

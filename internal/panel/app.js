@@ -1689,107 +1689,12 @@ let addTab = 'browser';
 function switchAddTab(tab) {
   document.querySelectorAll('#addTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   $('addTabQr').hidden = tab !== 'qr';
-  $('addTabSms').hidden = tab !== 'sms';
   $('addTabBrowser').hidden = tab !== 'browser';
   $('addTabToken').hidden = tab !== 'token';
   $('btnRefreshLogin').hidden = tab !== 'token';
   if (tab === 'qr' && !qrStarted) startQrLogin();
-  // 短信 tab 目前是「为什么走不通 + 替代方案」说明页，没有需要初始化的东西。
 }
 
-/* ── 短信登录 ───────────────────────────────────────────────────────
-   验证码是发到用户自己手机上的，面板只做「加密手机号 + 转发 + 用码换票」。
-   发码前必须过一次阿里云滑块（上游强制，缺 captcha_param 直接回 100006）。
-
-   滑块**不在本页跑**：第三方脚本会加载 o.alicdn.com / g.alicdn.com 的远程代码，
-   而主面板的 CSP 是 script-src 'self'（它挡着 XSS 注入，也是本页存着 API key 的
-   前提）。所以校验放在独立辅助页 /panel/sms-captcha：那一页有自己的 CSP、不读
-   localStorage、不调面板接口，校验完用 postMessage 把 captcha_param 送回来。
-   代价是多一次 window.open —— 换来的是主面板的 CSP 一个外部源都没放开。 */
-let smsCaptchaParam = ''; // 本次校验拿到的 captcha_param（一次性，发完即清）
-let smsCaptchaWin = null;
-
-function setSmsStatus(text, cls) {
-  const el = $('smsStatus');
-  if (!el) return; // 短信表单恢复前这一页只有说明文字，没有状态槽
-  el.textContent = text;
-  el.className = 'hint' + (cls ? ' ' + cls : '');
-}
-
-// openSmsCaptcha 打开校验辅助页：它在自己的文档里跑阿里云滑块，通过后 postMessage 回来。
-// 主面板不加载任何外部脚本（见文件头 CSP 说明）。
-function openSmsCaptcha() {
-  smsCaptchaParam = '';
-  const w = window.open('/panel/sms-captcha', 'xhx-sms-captcha', 'width=420,height=340');
-  if (!w) {
-    setSmsStatus('浏览器拦截了弹窗：请允许本站弹出窗口后重试', 'err');
-    return;
-  }
-  smsCaptchaWin = w;
-  setSmsStatus('请在弹出的窗口里拖动滑块完成校验…');
-  w.focus();
-}
-
-// 辅助页把 captcha_param 送回来：来源必须是同源（防止被别的页面 postMessage 塞假参数）。
-addEventListener('message', (ev) => {
-  if (ev.origin !== location.origin) return;
-  const d = ev.data;
-  if (!d || d.type !== 'xhx-sms-captcha') return;
-  smsCaptchaParam = String(d.param || '');
-  if (smsCaptchaWin && !smsCaptchaWin.closed) { try { smsCaptchaWin.close(); } catch (e) {} }
-  smsCaptchaWin = null;
-  if (!smsCaptchaParam) { setSmsStatus('校验未通过，请重试', 'err'); return; }
-  setSmsStatus('校验通过，正在发送验证码…');
-  sendSmsCode(smsCaptchaParam);
-});
-
-async function sendSmsCode(captchaParam) {
-  const phone = ($('smsPhone').value || '').trim();
-  if (!/^1\d{10}$/.test(phone.replace(/\D/g, ''))) {
-    setSmsStatus('请先填 11 位手机号', 'err');
-    return;
-  }
-  const btn = $('btnSmsSend');
-  if (!btn) { setSmsStatus('短信表单未启用', 'err'); return; }
-  btn.disabled = true;
-  setSmsStatus('正在发送…');
-  try {
-    const d = await api('login/sms/send', {
-      method: 'POST',
-      body: JSON.stringify({ phone, captcha_param: captchaParam || '' }),
-    });
-    setSmsStatus('已发到 ' + (d.phone || phone) + '，请查收短信', 'ok');
-    $('smsCode').focus();
-  } catch (e) {
-    setSmsStatus(e.message, 'err');
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function smsLogin() {
-  const phone = ($('smsPhone').value || '').trim();
-  const code = ($('smsCode').value || '').trim();
-  if (!phone) { setSmsStatus('请先填手机号', 'err'); return; }
-  if (!code) { setSmsStatus('请填短信验证码', 'err'); return; }
-  const btn = $('btnSmsLogin');
-  if (!btn) { setSmsStatus('短信表单未启用', 'err'); return; }
-  btn.disabled = true;
-  setSmsStatus('登录中…');
-  try {
-    const d = await api('login/sms/verify', {
-      method: 'POST',
-      body: JSON.stringify({ phone, code }),
-    });
-    toast('已加入：' + (d.nickname || d.uid), 'ok');
-    $('addVeil').classList.remove('on');
-    loadOverview(true);
-  } catch (e) {
-    setSmsStatus(e.message, 'err');
-  } finally {
-    btn.disabled = false;
-  }
-}
 
 // startQrLogin 开一次扫码会话：拿会话 id 与二维码，之后靠 poll 收号。
 // 二维码图走 /panel/api/login/qr.png（服务端画，不依赖 CDN，内网也能用）。
@@ -2014,8 +1919,6 @@ function boot() {
     $('addVeil').classList.remove('on');
   };
   $('btnSubmitCallback').onclick = submitCallback;
-  // 短信表单已收起（滑块只对官方域名授权，实测拿不到 captcha_param，见 index.html 说明）。
-  // openSmsCaptcha / sendSmsCode / smsLogin 都留着：哪天上游开放场景授权，把表单加回来即可。
   $('btnQrRefresh').onclick = () => { qrStarted = false; startQrLogin(); };
   // 回车即提交，省一次点击（粘贴完习惯性敲回车）。
   $('addCallbackUrl').addEventListener('keydown', e => { if (e.key === 'Enter') submitCallback(); });
