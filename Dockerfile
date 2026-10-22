@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # 多阶段构建：Go 编译 + alpine 运行时（非 root + healthcheck）。
-FROM golang:1.23-alpine AS build
+FROM golang:1.26.10-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download
