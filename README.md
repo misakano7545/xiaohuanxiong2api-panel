@@ -58,7 +58,8 @@
 | 续期 | `POST {auth_base}/refresh` | body `{"refresh_token":…}`，回 `data.access_token/refresh_token` |
 | 目录 | `GET {llm_base}/model_catalog` | `data.categories[].models[]`，`visible:false` 不展示 |
 | 积分 | `GET {points_base}/balance` | `data.available_points` + 四个钱包字段 |
-| 签到 | `GET {origin}/api/web/office/v3/setting_info` | 触发当日积分发放，幂等 |
+| 签到 | `POST {origin}/api/web/desktop/v1/login/points/grant` + `GET {points_base}/bills` | 每日 300 分是服务端 00:00 自动发放、午夜清零，没有「调一下就发分」的客户端开关；grant 是幂等的登录领取（领过回 `granted:false`），是否到账以 bills 里当天的 `daily_grant` 为准 |
+| 手机端首登 | `POST {origin}/api/web/mobile/v1/login/points/grant` | 与桌面端那笔额度独立，桌面端领过的号照样能领 |
 | 换码登录 | `POST {auth_base}/login_with_authorization_code` | 用 `office-raccoon://` 回调里的 code 换票 |
 
 网关只做四件事：选号与续期、把响应帧里的 `model` 改回客户端请求的名字、
@@ -113,7 +114,7 @@ Docker：`docker compose up -d --build`（`auths/`、`data/`、`config.json` 都
 | `auth_dir` / `state_file` | `./auths` / `./data/state.json` | 账号目录与池状态 |
 | `default_model` | `raccoon-chat-ml-5-5` | 请求没带 model 时用 |
 | `upstream.llm_base` / `auth_base` | 内置常量 | 推理网关 / 鉴权基址 |
-| `upstream.points_base` / `origin` | 内置常量 | 积分 / 主站（签到） |
+| `upstream.points_base` / `origin` | 内置常量 | 积分 / 主站（手机端首登奖励） |
 | `upstream.timeout_seconds` / `header_timeout_seconds` / `idle_timeout_seconds` | `120/120/300` | 短请求总超时 / 首字节超时 / 流内空闲 |
 | `cooldown.plan_credit` / `soft_rate` / `soft_rate_max` | `12h/60s/2h` | 额度、限流冷却与退避封顶 |
 | `pool.*` | 见示例 | 在途上限、熔断/降权阈值、闲置补偿 |
@@ -147,12 +148,12 @@ wire_api = "responses"
 
 - **非官方、未获授权**：本文与上游服务商无任何关系，仅用于**本人授权账号**在本机 / 私有环境下的协议互操作。
 - **凭证**：`auths/*.json` 以 0600 明文保存，目录不得进入备份、同步盘或共享范围；仓库不含任何账号、token 或密钥。
-- **鉴权**：`api_key`（或 `api_keys`）为空时 `/v1/*` 与 `/panel/api/*` 不鉴权，仅适合 `127.0.0.1` 或可信内网；公网部署必须设密钥并前置 HTTPS 反代与访问限流。
+- **鉴权**：`api_key` 为空时 `/v1/*` 与 `/panel/api/*` 不鉴权，仅适合 `127.0.0.1` 或可信内网；公网部署必须设密钥并前置 HTTPS 反代与访问限流。
 - **合规边界**：不得用于搭建对外中转站、共享他人账号、批量注册小号或售卖额度；作者不承担使用后果。
 
 ## 行为与边界
 
-- **模型名**：`/v1/models` 来自上游目录（`visible:false` 不展示），目录拉不到时用内置兜底表；
+- **模型名**：`/v1/models` 来自上游目录（`visible:false` 不展示），目录拉不到时回落到内置单条兜底（`raccoon-8c4485`，只为让面板不空表）；
   未知模型直接 400，不打上游。客户端写死的 `gpt-4o` 一类名字映射到 `raccoon-chat-ml-5-5`。
 - **错误口径**：401 先续期同号再重试一次，429 软冷却，5xx 熔断换号；请求本身被上游拒（其余 4xx）
   不换号，照实回上游状态码与原话。流里 `{"error":…}` 不算成功（会触发换号）。
