@@ -357,6 +357,8 @@ func liftMaxTokens(body []byte) []byte {
 type chatRequest struct {
 	Stream bool   `json:"stream"`
 	Model  string `json:"model"`
+	// Tools 只为数一下声明了几把工具（观测面），内容不解析、不进日志。
+	Tools []json.RawMessage `json:"tools"`
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -371,6 +373,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	var peek chatRequest
 	_ = json.Unmarshal(body, &peek)
+	// 声明数在开轮转之前定下来：换号重试沿用同一份入站 body，声明数不会变。
+	if tr := traceFrom(r); tr != nil {
+		tr.ToolsDeclared = len(peek.Tools)
+	}
 
 	// 地区前缀（[realm:]model）在这里剥掉：后面 mapModel / 出站 body / 台账都用裸名。
 	realm, bareModel := resolveModel(peek.Model)
@@ -622,11 +628,15 @@ func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, acct *auth
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		// 流内业务错误（额度/限流/会话失效/排队）→ 记进账号状态，错误信息注入 SSE。
 		streamErr := false
+		stat := &upstream.StreamStat{}
 		usg, serr := upstream.StreamWithError(w, rc, func(se *upstream.StreamError) {
 			streamErr = true
 			h.handleStreamError(acct.UID, se)
-		}, peek.Model)
+		}, peek.Model, stat)
 		rc.Close()
+		if tr != nil {
+			tr.ToolCalls = stat.ToolCalls
+		}
 		// serr 非 nil 只可能是「一个字节都没写给客户端」的失败（空流 / 首帧就是错误信封）：
 		// 此时响应还没提交，必须交回调用方换号或如实回错误体——早先这里只处理空流，
 		// 首帧错误的流会 return true 变成空 200（客户端收到的是一段没有内容的回复）。
@@ -667,6 +677,9 @@ func (h *Handler) attempt(ctx context.Context, w http.ResponseWriter, acct *auth
 		return true, err
 	}
 	h.cfg.Pool.NoteSuccess(acct.UID)
+	if tr != nil {
+		tr.ToolCalls = toolCallCount(resp)
+	}
 	h.noteUsage(acct.UID, peek.Model, attemptStart, true, usageOf(resp), tr)
 	h.bindSession(sessKey, acct.UID)
 	writeJSON(w, http.StatusOK, resp)
@@ -773,6 +786,22 @@ func (h *Handler) noteUsage(uid, model string, started time.Time, ok bool, upstr
 func usageOf(resp map[string]any) map[string]any {
 	m, _ := resp["usage"].(map[string]any)
 	return m
+}
+
+// toolCallCount 数聚合响应里的工具调用个数（观测面）。只计数，不解析名字与参数。
+// Aggregate 组包用 []map[string]any、直解上游 JSON 是 []any —— 两种都得认，只认一种会恒记 0。
+func toolCallCount(resp map[string]any) int {
+	choices, _ := resp["choices"].([]any)
+	if len(choices) == 0 {
+		return 0
+	}
+	ch, _ := choices[0].(map[string]any)
+	msg, _ := ch["message"].(map[string]any)
+	if tcs, ok := msg["tool_calls"].([]map[string]any); ok {
+		return len(tcs)
+	}
+	tcs, _ := msg["tool_calls"].([]any)
+	return len(tcs)
 }
 
 // numField 读 usage 里的整数字段：JSON 解出来是 float64，探针/测试里可能是 int。

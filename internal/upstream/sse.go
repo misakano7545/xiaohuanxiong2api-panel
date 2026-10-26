@@ -427,14 +427,18 @@ func Aggregate(r io.Reader, model string) (map[string]any, error) {
 
 // Stream 转发 SSE（不关心错误回调）。
 func Stream(w http.ResponseWriter, r io.Reader, model string) error {
-	_, err := StreamWithError(w, r, nil, model)
+	_, err := StreamWithError(w, r, nil, model, nil)
 	return err
 }
+
+// StreamStat 流内观测结果。目前只有一件事：客户端到底有没有收到工具调用帧。
+// 调用方传 nil 表示不关心。只计数，不解析工具名与参数。
+type StreamStat struct{ ToolCalls int }
 
 // StreamWithError 把上游信封里的内层 chunk 转成 OpenAI SSE 帧写给客户端。
 // 遇到流内业务错误时回调 onErr（非 nil）并注入错误帧收尾；返回末帧 usage。
 // model 是客户端请求的模型名：小浣熊会把帧里的 model 换成它的内部名，出站帧必须改回来。
-func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*StreamError), model string) (map[string]any, error) {
+func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*StreamError), model string, stat *StreamStat) (map[string]any, error) {
 	fl, _ := w.(http.Flusher)
 	var wrote bool
 	ensureHeaders := func() {
@@ -567,6 +571,11 @@ func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*StreamError
 				}
 				if err := send(payload, ""); err != nil {
 					return true, err
+				}
+				// 记在帧真的写出去之后：客户端断开时它就没看到过工具帧。只记「有没有」，
+				// 不数帧——一次调用会被上游切成很多片。
+				if d.kind == deltaToolCall && stat != nil {
+					stat.ToolCalls = 1
 				}
 			}
 		}

@@ -765,6 +765,15 @@ function reqCreditCell(e) {
   return trimFixed(v.toFixed(2)) + (v === 0 ? '<span class="muted" title="限免模型：本次未产生扣费"> 免</span>' : '');
 }
 
+// 工具面：声明了却没调用 → 标黄。两个数缺一都判不出来，所以只在声明数有值时显示。
+function reqToolCell(e) {
+  const declared = Number(e && e.tools_declared || 0);
+  if (!declared) return '<span class="muted">—</span>';
+  const called = Number(e && e.tool_calls || 0);
+  const text = esc(declared + ' / ' + called);
+  return called ? text : '<span class="tag warn" title="声明了工具但一次没调用">' + text + '</span>';
+}
+
 function renderRequestTable() {
   const list = reqEntries.filter(e => reqMatch(e));
   const tb = $('reqBody');
@@ -779,6 +788,7 @@ function renderRequestTable() {
       '<td>' + reqOutcomeTag(e) + '</td>' +
       '<td>' + esc(e && e.model || '—') + '</td>' +
       '<td>' + esc(e && e.account || '—') + '</td>' +
+      '<td class="num">' + reqToolCell(e) + '</td>' +
       '<td>' + (ip ? '<span class="clip ip" title="' + esc(ip) + '">' + esc(ip) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td>' + (ua ? '<span class="clip" title="' + esc(ua) + '">' + esc(ua) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td class="num">' + fmtMs(e && e.duration_ms) + '</td>' +
@@ -786,7 +796,7 @@ function renderRequestTable() {
       '<td class="num">' + reqCreditCell(e) + '</td>' +
       '<td>' + (rid ? '<span class="clip rid" title="' + esc(rid) + '">' + esc(rid) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '</tr>';
-  }).join('') || '<tr><td colspan="10" class="empty">' +
+  }).join('') || '<tr><td colspan="11" class="empty">' +
       (reqEntries.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录') + '</td></tr>';
 
   const filtered = list.length !== reqEntries.length;
