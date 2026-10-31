@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/safefile"
 )
 
 // CoolKind 冷却类型。
@@ -1097,12 +1098,8 @@ func (p *Pool) saveLocked() {
 	if dir := filepath.Dir(p.stateFp); dir != "" && dir != "." {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	tmp := p.stateFp + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	// safefile.Write：临时文件 fsync 后才 rename，掉电不会留下长度对、内容全零的状态盘。
+	if err := safefile.Write(p.stateFp, raw, 0o600); err != nil {
 		log.Printf("[pool] 状态落盘失败（冷却/禁用标记可能在重启后丢失）: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, p.stateFp); err != nil {
-		log.Printf("[pool] 状态替换失败（同上）: %v", err)
 	}
 }

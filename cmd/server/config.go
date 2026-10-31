@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/prompt"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/safefile"
 )
 
 // Config 顶层配置。
@@ -585,9 +586,5 @@ func SaveFile(path string, c *Config) error {
 			return err
 		}
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return safefile.Write(path, raw, 0o600)
 }

@@ -17,6 +17,7 @@ package usage
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/safefile"
 	"log"
 	"os"
 	"path/filepath"
@@ -328,13 +329,8 @@ func (r *Recorder) flush(force bool) {
 		log.Printf("[usage] 建目录失败: %v", err)
 		return
 	}
-	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		log.Printf("[usage] 写临时文件失败: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, r.path); err != nil {
-		log.Printf("[usage] 原子替换失败: %v", err)
+	if err := safefile.Write(r.path, raw, 0o600); err != nil {
+		log.Printf("[usage] 落盘失败: %v", err)
 		return
 	}
 	// 只有真写成了才清 dirty：先清的话，落盘失败后台 ticker 看到 dirty=false 就不再重试，

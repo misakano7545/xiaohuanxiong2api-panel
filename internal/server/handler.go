@@ -3,7 +3,6 @@ package server
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/httpauth"
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/pool"
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/prompt"
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/reqlog"
@@ -169,13 +169,7 @@ func (h *Handler) authOK(r *http.Request) bool {
 	if want == "" {
 		return true
 	}
-	authz := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if len(authz) < len(prefix) || !strings.EqualFold(authz[:len(prefix)], prefix) {
-		return false
-	}
-	// 常量时间比较，防时序攻击（本地代理但按规范）。
-	return subtle.ConstantTimeCompare([]byte(authz[len(prefix):]), []byte(want)) == 1
+	return httpauth.VerifyBearer(r, want)
 }
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {

@@ -2,7 +2,6 @@
 package panel
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/auth"
+	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/httpauth"
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/pool"
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/reqlog"
 	"github.com/misakano7545/xiaohuanxiong2api-panel/internal/scheduler"
@@ -81,6 +81,7 @@ func New(cfg Config) *Panel {
 	}
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
+	p.mux.HandleFunc("GET /panel/theme.js", p.themeScript)
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
@@ -141,12 +142,7 @@ func (p *Panel) authorized(r *http.Request) bool {
 		}
 		return sameOrigin(r)
 	}
-	h := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if len(h) < len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(h[len(prefix):]), []byte(want)) == 1
+	return httpauth.VerifyBearer(r, want)
 }
 
 // key 当前生效的面板密钥（空 = 不鉴权）。
