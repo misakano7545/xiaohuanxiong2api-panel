@@ -41,9 +41,13 @@ const (
 	// 拿满（实测确认）。所以一次性福利要两条都领，只在账号页展示桌面端那笔会漏钱。
 	MobileGrantPath = "/login/points/grant"
 	PointsBillsPath = "/bills"
-	// limit 必须给足：流水按时间倒序，重度使用一天几十条 -N 消费记录会把
-	// 今日 +300 的 daily_grant 挤出前 10 条，签到状态就会误判 false。
-	PointsBillsQuery = "paging.limit=100&type=all&paging.offset=0"
+	// 只查收入流水（type=income）：调用方（dailyBatchExpiry / earliestBatchExpiry /
+	// DailyGrantDetail）全都只关心 daily_grant，消费记录对它们纯属噪声。
+	// 用 type=all 时窗口会被消费挤爆——实测该号 2026-11-05 一天 69 条 -1 消费，
+	// 当天一旦超过约 95 条，当天的 daily_grant 就被挤出前 100 行，签到复核随之误判
+	// false（连 Ever/LastDay 也一并查空，还会错判成「上游未开通每日积分」）。
+	// type=income 只返回发放，实测 8 条覆盖全部日期，永远挤不掉。
+	PointsBillsQuery = "paging.limit=100&type=income&paging.offset=0"
 
 	// RegionGlobal / RegionCN 保留基线的地区常量：小浣熊只有一个站
 	// （xiaohuanxiong.com），面板上的「地区」选择已注释掉（index.html 的 .realm-row），
