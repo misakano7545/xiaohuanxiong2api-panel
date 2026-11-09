@@ -596,12 +596,23 @@ func (s *Scheduler) CheckinUID(uid string) (CheckinResult, error) {
 						" 注册的新号，首批在次日 00:00 发放）"
 					log.Printf("checkin %s: pending（%s 注册的新号，等次日 00:00 首批每日积分）",
 						uid, created.In(shanghaiTZ).Format("2006-01-02 15:04"))
-				} else if _, ever, derr := s.cfg.Upstream.DailyGrant(a); derr == nil && !ever {
+				} else if info, derr := s.cfg.Upstream.DailyGrantDetail(a); derr == nil && !info.Ever {
 					// 上游从没给这个号发过每日积分（流水里一条 daily_grant 都没有）：
 					// 再怎么 claim 也不会有，报 failed 只会每轮刷一条假失败 + 记冷却。
 					res.Status = "skipped"
 					res.Reason = "上游未给该账号开通每日积分（积分流水无 daily_grant，daily_points=0），无需签到"
 					log.Printf("checkin %s: skipped（流水里从来没有 daily_grant，上游未开通每日积分）", uid)
+				} else if derr == nil && info.LastDay != "" &&
+					info.LastDay != time.Now().In(shanghaiTZ).Format("2006-01-02") {
+					// 历史有发放、今天这条还没出现 —— 上游发放是 00:00，但流水落库会晚
+					// （实测 0 分钟到 20 小时不等）。这**不是签到失败**，只是还没记账。
+					// 报 failed 会给账号记 5 分钟签到冷却、面板挂一句「复核未通过」吓人，
+					// 而补签轮次本来每小时就会重扫，到时自然签上。
+					res.Status = "pending"
+					res.Reason = "上游今日积分尚未反映到积分流水（最近一次发放 " +
+						info.LastDay + "），稍后自动补签"
+					log.Printf("checkin %s: pending（最近发放 %s，今日流水未到，等补签轮次）",
+						uid, info.LastDay)
 				} else {
 					checkinErr = &upstream.BusinessError{Message: "签到复核未通过：上游仍报未签到"}
 					log.Printf("checkin verify %s: status still checked_in=false", uid)
