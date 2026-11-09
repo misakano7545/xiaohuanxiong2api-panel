@@ -373,14 +373,36 @@ func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, ena
 // 与它的 code_identity 为空一致。这种号 claim 再多轮也不会有 daily_grant，
 // 报「签到复核未通过」是谎报失败。
 func (c *Client) DailyGrant(a *auth.Auth) (today, ever bool, err error) {
+	d, err := c.DailyGrantDetail(a)
+	return d.Today, d.Ever, err
+}
+
+// DailyGrantDetail 是 DailyGrant 的详细版，多给一个 LastDay（最近一次发放的
+// grant_at 日期，形如 "2026-11-09"；没有历史时为空）。
+//
+// 为什么要 LastDay：上游发积分是 00:00 入账，但 bills 流水的 created_at
+// 落库时刻可能晚几十分钟到几小时（实测 2026-11-05 晚了 20 小时）。
+// 复核时如果只看「今天有没有」，流水没落库就会被判成「没签到」。
+// 有了 LastDay，调用方就能区分「上游压根没发」和「发了但流水还没到」。
+//
+// 比较日期一律用 grant_at：它是发放入账时刻，恒为当天 00:00:00；
+// created_at 只是流水落库时刻，拿它做「今天有没有」的判据会误判。
+type DailyGrantInfo struct {
+	Today   bool
+	Ever    bool
+	LastDay string
+}
+
+func (c *Client) DailyGrantDetail(a *auth.Auth) (DailyGrantInfo, error) {
+	var info DailyGrantInfo
 	resp, err := c.doJSON(http.MethodGet,
 		c.pointsBase()+PointsBillsPath+"?"+PointsBillsQuery, nil, c.authHeader(a))
 	if err != nil {
-		return false, false, err
+		return info, err
 	}
 	data, err := payloadOf(resp, "积分流水")
 	if err != nil {
-		return false, false, err
+		return info, err
 	}
 	day := time.Now().In(shanghaiTZ).Format("2006-01-02")
 	items, _ := data["items"].([]any)
@@ -389,13 +411,20 @@ func (c *Client) DailyGrant(a *auth.Auth) (today, ever bool, err error) {
 		if item == nil || text(item, "biz_type") != "daily_grant" {
 			continue
 		}
-		ever = true
+		info.Ever = true
 		grantAt := text(item, "grant_at", "created_at")
-		if len(grantAt) >= 10 && grantAt[:10] == day {
-			today = true
+		if len(grantAt) < 10 {
+			continue
+		}
+		d := grantAt[:10]
+		if d > info.LastDay {
+			info.LastDay = d
+		}
+		if d == day {
+			info.Today = true
 		}
 	}
-	return today, ever, nil
+	return info, nil
 }
 
 // CheckinClaim 走登录领取接口（上游幂等：今日已发放则 granted=false）。
